@@ -1,0 +1,46 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Values.aiModel.name }}-deployment
+  namespace: {{ .Values.namespace }}
+  labels:
+    app: {{ .Values.aiModel.name }}
+    version: {{ .Chart.AppVersion }}
+spec:
+  replicas: {{ .Values.aiModel.replicas }}
+  selector:
+    matchLabels:
+      app: {{ .Values.aiModel.name }}
+  template:
+    metadata:
+      labels:
+        app: {{ .Values.aiModel.name }}
+    spec:
+      containers:
+        - name: {{ .Values.aiModel.name }}
+          image: {{ .Values.aiModel.image }}
+          imagePullPolicy: {{ .Values.aiModel.imagePullPolicy }}
+          env:
+            - name: PROMETHEUS_URL
+              value: {{ .Values.aiModel.env.prometheusUrl | quote }}
+            - name: PUSHGATEWAY_URL
+              value: {{ .Values.aiModel.env.pushgatewayUrl | quote }}
+            - name: POD_CAPACITY_THRESHOLD
+              value: {{ .Values.aiModel.env.podCapacityThreshold | quote }}
+            - name: SAFETY_BUFFER_PODS
+              value: {{ .Values.aiModel.env.safetyBufferPods | quote }}
+            - name: FALSE_ALARM_TIMEOUT
+              value: {{ .Values.aiModel.env.falseAlarmTimeout | quote }}
+            - name: FORECAST_HORIZON
+              value: {{ .Values.aiModel.env.forecastHorizon | default "5" | quote }}
+            - name: CI_LEVEL
+              value: {{ .Values.aiModel.env.ciLevel | default "0.95" | quote }}
+          resources:
+            requests:
+              cpu: {{ .Values.aiModel.resources.requests.cpu }}
+              memory: {{ .Values.aiModel.resources.requests.memory }}
+            limits:
+              cpu: {{ .Values.aiModel.resources.limits.cpu }}
+              memory: {{ .Values.aiModel.resources.limits.memory }}
+          # Note: No liveness probe — predictor has no HTTP endpoint.
+          # Health is monitored via Pushgateway metric staleness.

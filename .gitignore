@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+.env
+
+# Experiment results (large CSV files)
+results_*.csv
+*.log
+*.jsonl
+spike_events.jsonl
+latency_live.json
+model_comparison_results.*
+model_comparison_chart.png
+karsilastirma_*.txt
+karsilastirma_*.png
+grafik_*.png
+*.rapor.txt
+results_combined_AB.csv
+
+# Kubernetes / Docker secrets
+*.secret
+.kube/
+
+# OS
+.DS_Store
+desktop.ini
+Thumbs.db

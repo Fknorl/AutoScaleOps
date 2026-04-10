@@ -1,0 +1,73 @@
+# ═══════════════════════════════════════════════════════════════════════════
+# AutoScaleOps Helm Chart - Default Values
+# ═══════════════════════════════════════════════════════════════════════════
+# Namespace is set dynamically by installer using --set namespace=autoscaleops-{id}
+
+# ─── Global ──────────────────────────────────────────────────────────────────
+namespace: autoscaleops-default   # Overridden by installer
+
+# ─── Flask Application ───────────────────────────────────────────────────────
+app:
+  name: autoscaleops-app
+  image: autoscaleops-app:latest
+  imagePullPolicy: Never           # Using local Minikube image
+  replicas: 2
+  port: 8080
+
+  resources:
+    requests:
+      cpu: "100m"
+      memory: "128Mi"
+    limits:
+      cpu: "500m"
+      memory: "512Mi"
+
+  service:
+    type: ClusterIP
+    port: 8080
+    targetPort: 8080
+
+# ─── AI Predictor ─────────────────────────────────────────────────────────────
+aiModel:
+  name: autoscaleops-ai
+  image: autoscaleops-ai:latest
+  imagePullPolicy: Never
+  replicas: 1
+
+  resources:
+    requests:
+      cpu: "200m"
+      memory: "256Mi"
+    limits:
+      cpu: "1000m"
+      memory: "1Gi"
+
+  env:
+    prometheusUrl: "http://prometheus-kube-prometheus-prometheus.monitoring.svc.cluster.local:9090"
+    pushgatewayUrl: "http://pushgateway.autoscaleops.svc.cluster.local:9091"
+    podCapacityThreshold: "100"
+    safetyBufferPods: "2"
+    falseAlarmTimeout: "300"
+    forecastHorizon: "5"
+    ciLevel: "0.95"
+
+# ─── KEDA Autoscaling ────────────────────────────────────────────────────────
+keda:
+  enabled: true
+  minReplicas: 2
+  maxReplicas: 10
+  threshold: "10"
+  prometheusAddress: "http://prometheus-kube-prometheus-prometheus.monitoring.svc.cluster.local:9090"
+  metricName: "predicted_rps_30min"
+  query: "predicted_rps_30min"
+
+# ─── Prometheus ──────────────────────────────────────────────────────────────
+prometheus:
+  namespace: monitoring
+  serviceUrl: "prometheus-kube-prometheus-prometheus.monitoring.svc.cluster.local"
+  port: 9090
+
+pushgateway:
+  namespace: monitoring
+  serviceUrl: "prometheus-kube-prometheus-pushgateway.monitoring.svc.cluster.local"
+  port: 9091

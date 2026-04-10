@@ -1,0 +1,27 @@
+# ═══════════════════════════════════════════════════════════════════════════
+# AI Predictor Requirements - AutoScaleOps
+# ═══════════════════════════════════════════════════════════════════════════
+
+# HTTP Requests
+requests==2.31.0
+
+# Prometheus Client
+prometheus-client==0.19.0
+
+# Data Processing
+pandas==2.1.4
+numpy==1.26.2
+
+# Time Series Forecasting (Auto-ARIMA)
+pmdarima==2.0.4
+
+# Statistical Libraries
+statsmodels==0.14.1
+scipy==1.11.4
+
+# scikit-learn pinned for pmdarima 2.0.4 compatibility
+# (scikit-learn 1.5+ removed force_all_finite parameter)
+scikit-learn==1.4.2
+
+# Time Series — Additional Models (prophet for model_comparison.py, not needed in predictor)
+# prophet>=1.1.4  # Install locally: pip install prophet

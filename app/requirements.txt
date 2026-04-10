@@ -1,0 +1,13 @@
+# ═══════════════════════════════════════════════════════════════════════════
+# Flask Application Requirements - AutoScaleOps
+# ═══════════════════════════════════════════════════════════════════════════
+
+# Web Framework
+Flask==3.0.0
+Werkzeug==3.0.1
+
+# Prometheus Metrics
+prometheus-client==0.19.0
+
+# HTTP Requests (for health checks)
+requests==2.31.0

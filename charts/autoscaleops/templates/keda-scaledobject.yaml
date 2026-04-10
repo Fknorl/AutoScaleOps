@@ -1,0 +1,23 @@
+{{- if .Values.keda.enabled }}
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: autoscaleops-keda
+  namespace: {{ .Values.namespace }}
+  labels:
+    app: autoscaleops
+spec:
+  scaleTargetRef:
+    name: {{ .Values.app.name }}-deployment
+  minReplicaCount: {{ .Values.keda.minReplicas }}
+  maxReplicaCount: {{ .Values.keda.maxReplicas }}
+  cooldownPeriod: 60
+  pollingInterval: 15
+  triggers:
+    - type: prometheus
+      metadata:
+        serverAddress: {{ .Values.keda.prometheusAddress }}
+        metricName: {{ .Values.keda.metricName }}
+        threshold: {{ .Values.keda.threshold | quote }}
+        query: {{ .Values.keda.query }}
+{{- end }}

@@ -1,0 +1,19 @@
+apiVersion: v2
+name: autoscaleops
+description: AI-Powered Predictive Auto-Scaling Platform for Local Kubernetes
+
+type: application
+version: 1.0.0
+appVersion: "2.2.0"
+
+keywords:
+  - autoscaling
+  - kubernetes
+  - ai
+  - predictive
+  - keda
+
+maintainers:
+  - name: AutoScaleOps Team
+
+dependencies: []
