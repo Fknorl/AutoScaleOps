@@ -255,6 +255,98 @@ def report(input, compare, output, plots):
     console.print(f"\n[green]✓[/green] Rapor kaydedildi: [bold]{output}[/bold]")
 
 
+# ─── doctor ──────────────────────────────────────────────────────────────────
+
+@main.command()
+def doctor():
+    """Sistem gereksinimlerini kontrol eder (kubectl, helm, keda, prometheus)."""
+    import shutil
+    import subprocess
+
+    console.print("\n[bold]AutoScaleOps — Sistem Kontrolu[/bold]\n")
+
+    all_ok = True
+
+    # ── Araçlar ────────────────────────────────────────────────────────────────
+    console.print("[bold cyan]Araçlar:[/bold cyan]")
+    # tool → (version_args, zorunlu mu)
+    tools = {
+        "kubectl": (["kubectl", "version", "--client"],               True),
+        "helm":    (["helm", "version", "--short"],                   True),
+        "docker":  (["docker", "--version"],                          False),
+        "python":  ([sys.executable, "--version"],                    True),
+    }
+    desc_map = {
+        "kubectl": "Kubernetes CLI — zorunlu",
+        "helm":    "Helm — chart deploy için zorunlu",
+        "docker":  "image build için gerekli (isteğe bağlı)",
+        "python":  "Python 3.10+",
+    }
+    for tool, (ver_args, required) in tools.items():
+        path = shutil.which(tool) or shutil.which(sys.executable if tool == "python" else tool)
+        if path or tool == "python":
+            try:
+                ver = subprocess.run(ver_args, capture_output=True, text=True, timeout=5)
+                raw = (ver.stdout or ver.stderr).strip().split("\n")[0][:60]
+                ver_str = raw if raw else path
+            except Exception:
+                ver_str = path or "?"
+            console.print(f"  [green]OK[/green]  {tool:<10} {ver_str}")
+        else:
+            level = "[red]XX[/red]" if required else "[yellow]--[/yellow]"
+            console.print(f"  {level}  {tool:<10} bulunamadi — {desc_map[tool]}")
+            if required:
+                all_ok = False
+
+    # ── Python paketleri ───────────────────────────────────────────────────────
+    console.print("\n[bold cyan]Python Paketleri:[/bold cyan]")
+    packages = ["pmdarima", "statsmodels", "prometheus_client", "click", "yaml", "jinja2", "rich"]
+    for pkg in packages:
+        import_name = "yaml" if pkg == "yaml" else pkg
+        try:
+            mod = __import__(import_name)
+            ver = getattr(mod, "__version__", "?")
+            console.print(f"  [green]OK[/green]  {pkg:<22} {ver}")
+        except ImportError:
+            console.print(f"  [red]XX[/red]  {pkg:<22} yuklu degil — pip install {pkg}")
+            all_ok = False
+
+    # ── Kubernetes bağlantısı ──────────────────────────────────────────────────
+    console.print("\n[bold cyan]Kubernetes Baglantisi:[/bold cyan]")
+    if shutil.which("kubectl"):
+        result = subprocess.run(
+            ["kubectl", "cluster-info"], capture_output=True, text=True, timeout=10
+        )
+        if result.returncode == 0:
+            first_line = result.stdout.strip().split("\n")[0][:70]
+            console.print(f"  [green]OK[/green]  Cluster aktif: {first_line}")
+        else:
+            console.print("  [yellow]??[/yellow]  Cluster erisilemedi — kubectl config kontrol et")
+            all_ok = False
+    else:
+        console.print("  [red]XX[/red]  kubectl yok, atlanıyor")
+
+    # ── KEDA kontrol ──────────────────────────────────────────────────────────
+    console.print("\n[bold cyan]KEDA:[/bold cyan]")
+    if shutil.which("kubectl"):
+        result = subprocess.run(
+            ["kubectl", "get", "crd", "scaledobjects.keda.sh"],
+            capture_output=True, text=True, timeout=10
+        )
+        if result.returncode == 0:
+            console.print("  [green]OK[/green]  KEDA kurulu ve CRD mevcut")
+        else:
+            console.print("  [yellow]!!![/yellow]  KEDA bulunamadı — deploy için gerekli")
+            console.print("  [dim]Kurmak için: helm install keda kedacore/keda -n keda --create-namespace[/dim]")
+
+    # ── Sonuç ─────────────────────────────────────────────────────────────────
+    console.print()
+    if all_ok:
+        console.print("[green]Tum kontroller gecti. 'autoscaleops deploy' ile devam edebilirsin.[/green]")
+    else:
+        console.print("[yellow]Bazi sorunlar tespit edildi. Yukaridaki hatalari gider.[/yellow]")
+
+
 # ─── info ────────────────────────────────────────────────────────────────────
 
 @main.command()
