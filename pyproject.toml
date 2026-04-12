@@ -1,0 +1,62 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "autoscaleops"
+version = "1.0.0"
+description = "ARIMA-based proactive Kubernetes autoscaling framework"
+readme = "README.md"
+license = { text = "MIT" }
+requires-python = ">=3.10"
+
+authors = [
+    { name = "AutoScaleOps Contributors" }
+]
+
+keywords = ["kubernetes", "autoscaling", "arima", "keda", "mlops", "time-series"]
+
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: System Administrators",
+    "Topic :: System :: Clustering",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
+
+dependencies = [
+    "click>=8.1.0",
+    "pyyaml>=6.0",
+    "rich>=13.0.0",
+    "requests>=2.31.0",
+    "pandas>=2.1.0",
+    "numpy>=1.26.0",
+    "pmdarima>=2.0.4",
+    "statsmodels>=0.14.0",
+    "scipy>=1.11.0",
+    "prometheus-client>=0.19.0",
+    "matplotlib>=3.8.0",
+    "jinja2>=3.1.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0", "black>=23.0", "ruff>=0.1.0"]
+
+[project.scripts]
+autoscaleops = "autoscaleops.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/Fknorl/AutoScaleOps"
+Repository = "https://github.com/Fknorl/AutoScaleOps"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["autoscaleops*"]
+
+[tool.setuptools.package-data]
+autoscaleops = ["templates/*.yaml", "templates/*.j2"]
