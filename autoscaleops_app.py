@@ -2936,23 +2936,40 @@ class _DashMetricCard(QFrame):
         super().__init__(parent)
         accent = accent or C_ACCENT
         self.setStyleSheet(
-            f"QFrame {{ background:{C_SURFACE}; border:1px solid rgba(255,255,255,0.08); "
-            f"border-radius:16px; }}"
+            f"QFrame {{ "
+            f"background: qlineargradient(x1:0,y1:0,x2:0,y2:1,"
+            f"stop:0 {C_SURFACE2}, stop:1 {C_SURFACE}); "
+            f"border: 1px solid rgba(255,255,255,0.07); "
+            f"border-radius: 16px; }}"
         )
-        _add_shadow(self, blur=16, offset_y=3, alpha=50)
+        _add_shadow(self, blur=18, offset_y=4, alpha=55)
         lay = QVBoxLayout(self)
         lay.setContentsMargins(16, 14, 16, 14)
-        lay.setSpacing(3)
+        lay.setSpacing(4)
+
+        # Üst: renkli ince çizgi (accent rengi)
+        bar = QFrame()
+        bar.setFixedHeight(2)
+        bar.setStyleSheet(
+            f"background: qlineargradient(x1:0,y1:0,x2:1,y2:0,"
+            f"stop:0 {accent}, stop:1 transparent); "
+            f"border:none; border-radius:1px;"
+        )
+        lay.addWidget(bar)
+        lay.addSpacing(2)
+
         t = QLabel(title.upper())
         t.setStyleSheet(
-            f"color:{C_TEXT_DIM}; font-size:10px; font-weight:700; "
-            f"letter-spacing:0.8px; background:transparent; border:none;"
+            f"color:{C_TEXT_DIM}; font-size:9px; font-weight:700; "
+            f"letter-spacing:1px; background:transparent; border:none;"
         )
         self._val_lbl = QLabel(value)
-        self._val_lbl.setFont(QFont("Segoe UI", 20, QFont.Weight.Bold))
+        self._val_lbl.setFont(QFont("Segoe UI", 22, QFont.Weight.Bold))
         self._val_lbl.setStyleSheet(f"color:{accent}; background:transparent; border:none;")
         self._sub_lbl = QLabel("")
-        self._sub_lbl.setStyleSheet(f"color:{C_TEXT_DIM}; font-size:10px; background:transparent; border:none;")
+        self._sub_lbl.setStyleSheet(
+            f"color:{C_TEXT_DIM}; font-size:10px; background:transparent; border:none;"
+        )
         lay.addWidget(t)
         lay.addWidget(self._val_lbl)
         lay.addWidget(self._sub_lbl)
@@ -6332,7 +6349,7 @@ class DashboardPanel(QWidget):
         title.setStyleSheet(f"color:{C_TEXT}; background:transparent; border:none;")
         self._live_dot = QLabel("⬤  CANLI")
         self._live_dot.setStyleSheet(
-            f"color:{C_TEXT_DIM}; font-size:10px; font-weight:600; background:transparent; border:none;"
+            f"color:{C_GREEN}; font-size:10px; font-weight:600; background:transparent; border:none;"
         )
         self._upd_lbl = QLabel("—")
         self._upd_lbl.setStyleSheet(f"color:{C_TEXT_DIM}; font-size:11px; background:transparent; border:none;")
@@ -8000,57 +8017,72 @@ class MainWindow(QMainWindow):
     # ── Sidebar ───────────────────────────────
     def _build_sidebar(self) -> QWidget:
         sidebar = QWidget()
-        sidebar.setFixedWidth(210)
+        sidebar.setFixedWidth(200)
         sidebar.setStyleSheet(f"""
             QWidget {{
                 background-color: {C_SIDEBAR};
-                border-right: 1px solid rgba(255,255,255,12);
+                border-right: 1px solid rgba(255,255,255,8);
             }}
         """)
         lay = QVBoxLayout(sidebar)
         lay.setContentsMargins(0, 0, 0, 0)
         lay.setSpacing(0)
 
-        # Logo area
+        # ── Logo area ───────────────────────────────────────────────────────
         logo_w = QWidget()
-        logo_w.setFixedHeight(64)
+        logo_w.setFixedHeight(60)
         logo_w.setStyleSheet(f"""
-            background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
-                stop:0 {C_SIDEBAR}, stop:1 #0F0F1E);
-            border-bottom: 1px solid rgba(255,255,255,10);
+            background: transparent;
+            border-bottom: 1px solid rgba(255,255,255,6);
         """)
         logo_lay = QHBoxLayout(logo_w)
-        logo_lay.setContentsMargins(18, 0, 18, 0)
-        logo_icon = QLabel("◈")
-        logo_icon.setStyleSheet(f"color:{C_ACCENT}; font-size:18px; background:transparent; border:none;")
+        logo_lay.setContentsMargins(20, 0, 16, 0)
+
+        # Kare ikon kutusu
+        icon_box = QLabel("A")
+        icon_box.setFixedSize(28, 28)
+        icon_box.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        icon_box.setStyleSheet(f"""
+            background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
+                stop:0 #9BA8FA, stop:1 {C_ACCENT2});
+            color: #fff;
+            font-size: 13px;
+            font-weight: 700;
+            border-radius: 8px;
+            border: none;
+        """)
+
         logo_lbl = QLabel("AutoScaleOps")
-        logo_lbl.setStyleSheet(f"color:{C_TEXT}; font-size:14px; font-weight:700; background:transparent; border:none; letter-spacing:0.3px;")
-        logo_lay.addWidget(logo_icon)
-        logo_lay.addSpacing(6)
+        logo_lbl.setStyleSheet(
+            f"color:{C_TEXT}; font-size:13px; font-weight:700; "
+            f"background:transparent; border:none; letter-spacing:0.2px;"
+        )
+        logo_lay.addWidget(icon_box)
+        logo_lay.addSpacing(8)
         logo_lay.addWidget(logo_lbl)
         logo_lay.addStretch()
         lay.addWidget(logo_w)
-        lay.addSpacing(8)
+        lay.addSpacing(10)
 
-        # nav: (label, emoji)
+        # ── Nav items ───────────────────────────────────────────────────────
         # 0:Ana Sayfa  1:Dashboard  2:Aktivite  3:Sorun Gider  4:Ayarlar  5:Deploy
         nav_items = [
-            ("Ana Sayfa",   "⌂"),
-            ("Dashboard",   "◈"),
-            ("Aktivite",    "☰"),
-            ("Sorun Gider", "✦"),
-            ("Ayarlar",     "◎"),
-            ("Deploy",      "▲"),
+            ("Ana Sayfa",   "⊙"),
+            ("Dashboard",   "▦"),
+            ("Aktivite",    "≡"),
+            ("Sorun Gider", "⚙"),
+            ("Ayarlar",     "◇"),
+            ("Deploy",      "△"),
         ]
         self._nav_buttons = []
         nav_container = QWidget()
         nav_container.setStyleSheet("background:transparent; border:none;")
         nav_lay = QVBoxLayout(nav_container)
-        nav_lay.setContentsMargins(10, 0, 10, 0)
-        nav_lay.setSpacing(3)
+        nav_lay.setContentsMargins(12, 0, 12, 0)
+        nav_lay.setSpacing(2)
         for i, (name, icon) in enumerate(nav_items):
-            btn = QPushButton(f" {icon}   {name}")
-            btn.setFixedHeight(42)
+            btn = QPushButton(f"  {icon}   {name}")
+            btn.setFixedHeight(40)
             btn.setCheckable(True)
             btn.setStyleSheet(self._nav_btn_style(False))
             btn.clicked.connect(lambda checked, idx=i: self._nav_select(idx))
@@ -8059,9 +8091,17 @@ class MainWindow(QMainWindow):
         lay.addWidget(nav_container)
         lay.addStretch()
 
-        # Version label at bottom
+        # ── Alt alan: versiyon ──────────────────────────────────────────────
+        bottom_line = QFrame()
+        bottom_line.setFixedHeight(1)
+        bottom_line.setStyleSheet(f"background: rgba(255,255,255,6); border:none;")
+        lay.addWidget(bottom_line)
+
         ver_lbl = QLabel(f"v{APP_VERSION}")
-        ver_lbl.setStyleSheet(f"color:{C_TEXT_DIM}; font-size:10px; padding:10px 18px; background:transparent; border:none;")
+        ver_lbl.setStyleSheet(
+            f"color:{C_TEXT_DIM}; font-size:10px; padding:8px 20px; "
+            f"background:transparent; border:none;"
+        )
         lay.addWidget(ver_lbl)
         return sidebar
 
@@ -8069,33 +8109,31 @@ class MainWindow(QMainWindow):
         if active:
             return f"""
                 QPushButton {{
-                    background: qlineargradient(x1:0, y1:0, x2:1, y2:0,
-                        stop:0 rgba(129,140,248,35), stop:1 rgba(129,140,248,8));
+                    background: rgba(99,102,241,0.14);
                     color: {C_ACCENT};
-                    border: 1px solid rgba(129,140,248,70);
+                    border: none;
                     border-left: 2px solid {C_ACCENT};
-                    border-radius: 12px;
-                    font-size: 13px;
+                    border-radius: 10px;
+                    font-size: 12px;
                     font-weight: 600;
                     text-align: left;
-                    padding-left: 14px;
+                    padding-left: 12px;
                 }}
             """
         return f"""
             QPushButton {{
                 background: transparent;
                 color: {C_TEXT_DIM};
-                border: 1px solid transparent;
-                border-radius: 12px;
-                font-size: 13px;
+                border: none;
+                border-radius: 10px;
+                font-size: 12px;
                 font-weight: 400;
                 text-align: left;
                 padding-left: 14px;
             }}
             QPushButton:hover {{
-                background: rgba(129,140,248,8);
+                background: rgba(255,255,255,4);
                 color: {C_TEXT};
-                border: 1px solid rgba(129,140,248,30);
             }}
         """
 
@@ -8108,47 +8146,73 @@ class MainWindow(QMainWindow):
     # ── Top Bar ───────────────────────────────
     def _build_topbar(self) -> QWidget:
         bar = QWidget()
-        bar.setFixedHeight(60)
+        bar.setFixedHeight(56)
         bar.setStyleSheet(f"""
-            background: qlineargradient(x1:0, y1:0, x2:0, y2:1,
-                stop:0 {C_SURFACE}, stop:1 {C_BG});
-            border-bottom: 1px solid rgba(255,255,255,10);
+            background: {C_BG};
+            border-bottom: 1px solid rgba(255,255,255,7);
         """)
         lay = QHBoxLayout(bar)
-        lay.setContentsMargins(16, 0, 16, 0)
-        lay.setSpacing(16)
+        lay.setContentsMargins(20, 0, 20, 0)
+        lay.setSpacing(12)
 
-        # Cluster status
+        # Cluster durumu
         self._cluster_dot = StatusDot(C_RED)
-        self._cluster_status_bar_lbl = QLabel("Cluster Stopped")
-        self._cluster_status_bar_lbl.setStyleSheet(f"color:{C_RED}; font-weight:bold; font-size:13px;")
+        self._cluster_status_bar_lbl = QLabel("Cluster durduruldu")
+        self._cluster_status_bar_lbl.setStyleSheet(
+            f"color:{C_RED}; font-weight:600; font-size:12px;"
+        )
         lay.addWidget(self._cluster_dot)
+        lay.addSpacing(4)
         lay.addWidget(self._cluster_status_bar_lbl)
-
         lay.addStretch()
 
-        # Live metrics
-        self._bar_rps_lbl = QLabel("RPS: --")
-        self._bar_rps_lbl.setStyleSheet(f"color:{C_TEXT_DIM}; font-size:12px;")
-        self._bar_pods_lbl = QLabel("Pods: --")
-        self._bar_pods_lbl.setStyleSheet(f"color:{C_TEXT_DIM}; font-size:12px;")
-        lay.addWidget(self._bar_rps_lbl)
-        lay.addWidget(QLabel("|"))
-        lay.addWidget(self._bar_pods_lbl)
-        lay.addWidget(QLabel("|"))
+        # Canlı metrikler
+        self._bar_rps_lbl = QLabel("RPS  —")
+        self._bar_rps_lbl.setStyleSheet(f"color:{C_TEXT_DIM}; font-size:11px;")
+        self._bar_pods_lbl = QLabel("Pod  —")
+        self._bar_pods_lbl.setStyleSheet(f"color:{C_TEXT_DIM}; font-size:11px;")
 
-        # Avatar + user
+        # İnce dikey ayırıcı
+        def _vsep():
+            s = QFrame()
+            s.setFrameShape(QFrame.Shape.VLine)
+            s.setFixedHeight(18)
+            s.setStyleSheet("color: rgba(255,255,255,12); background: rgba(255,255,255,12); border:none;")
+            return s
+
+        lay.addWidget(self._bar_rps_lbl)
+        lay.addWidget(_vsep())
+        lay.addWidget(self._bar_pods_lbl)
+        lay.addWidget(_vsep())
+
+        # Avatar + kullanıcı adı (tıklanınca menü açılır)
         self._topbar_avatar = QLabel()
-        self._topbar_avatar.setFixedSize(32, 32)
-        self._topbar_avatar.setStyleSheet(f"border-radius:16px; background:{C_ACCENT}; color:#fff; font-weight:bold;")
+        self._topbar_avatar.setFixedSize(30, 30)
+        self._topbar_avatar.setStyleSheet(
+            f"border-radius:15px; background:{C_ACCENT2}; color:#fff; "
+            f"font-weight:700; font-size:12px;"
+        )
         self._topbar_avatar.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._topbar_name = QLabel("User")
-        self._topbar_name.setStyleSheet(f"color:{C_TEXT}; font-size:13px;")
+        self._topbar_name = QLabel("Kullanıcı")
+        self._topbar_name.setStyleSheet(f"color:{C_TEXT}; font-size:12px;")
+
+        # Chevron butonu
         self._topbar_btn = QToolButton()
-        self._topbar_btn.setStyleSheet("background:transparent; border:none;")
-        self._topbar_btn.setText("  v")
+        self._topbar_btn.setText("›")
+        self._topbar_btn.setStyleSheet(f"""
+            QToolButton {{
+                background: transparent;
+                border: none;
+                color: {C_TEXT_DIM};
+                font-size: 16px;
+                padding: 0;
+            }}
+            QToolButton:hover {{ color: {C_TEXT}; }}
+        """)
         self._topbar_btn.clicked.connect(self._show_user_menu)
+
         lay.addWidget(self._topbar_avatar)
+        lay.addSpacing(4)
         lay.addWidget(self._topbar_name)
         lay.addWidget(self._topbar_btn)
         return bar
@@ -8161,13 +8225,12 @@ class MainWindow(QMainWindow):
         menu.exec(QCursor.pos())
 
     def _logout(self):
-        reply = QMessageBox.question(self, "Logout",
-                                     "Are you sure you want to log out?",
+        reply = QMessageBox.question(self, "Çıkış",
+                                     "Oturumu kapatmak istediğinizden emin misiniz?",
                                      QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
         if reply == QMessageBox.StandardButton.Yes:
-            self.db.log_activity("logout", "User logged out")
+            self.db.log_activity("logout", "Kullanıcı oturumu kapattı")
             self.hide()
-            # Signal parent to show PIN screen
             if self.parent():
                 self.parent().show_pin_screen()
 
@@ -8252,8 +8315,8 @@ class MainWindow(QMainWindow):
     def _on_metrics(self, data: dict):
         rps = data.get("rps", 0.0)
         pods = data.get("pod_count", 0)
-        self._bar_rps_lbl.setText(f"RPS: {rps:.2f}")
-        self._bar_pods_lbl.setText(f"Pods: {pods}")
+        self._bar_rps_lbl.setText(f"RPS  {rps:.1f}")
+        self._bar_pods_lbl.setText(f"Pod  {pods}")
         self._home_panel.update_metrics(data)
         self._dashboard_panel.update_metrics(data)
 
@@ -8272,10 +8335,10 @@ class MainWindow(QMainWindow):
 
     def _update_cluster_ui(self, running: bool):
         color = C_GREEN if running else C_RED
-        text = "Cluster Running" if running else "Cluster Stopped"
+        text = "Cluster çalışıyor" if running else "Cluster durduruldu"
         self._cluster_dot.set_color(color)
         self._cluster_status_bar_lbl.setText(text)
-        self._cluster_status_bar_lbl.setStyleSheet(f"color:{color}; font-weight:bold; font-size:13px;")
+        self._cluster_status_bar_lbl.setStyleSheet(f"color:{color}; font-weight:600; font-size:12px;")
         self._home_panel.update_cluster_status(running)
         if hasattr(self, "_tray"):
             self._tray.update_cluster_state(running)
@@ -8331,9 +8394,10 @@ class MainWindow(QMainWindow):
         self._cluster_worker_thread.start()
 
         # Update UI to "working" state
+        action_tr = "başlatılıyor" if action == "start" else "durduruluyor"
         self._cluster_dot.set_color(C_YELLOW)
-        self._cluster_status_bar_lbl.setText(f"Cluster {action.title()}ing...")
-        self._cluster_status_bar_lbl.setStyleSheet(f"color:{C_YELLOW}; font-weight:bold;")
+        self._cluster_status_bar_lbl.setText(f"Cluster {action_tr}...")
+        self._cluster_status_bar_lbl.setStyleSheet(f"color:{C_YELLOW}; font-weight:600; font-size:12px;")
 
     @pyqtSlot(str, str)
     def _on_cluster_progress(self, msg: str, level: str):
@@ -8422,23 +8486,24 @@ class TrayIcon(QSystemTrayIcon):
         title_action = menu.addAction(APP_NAME)
         title_action.setEnabled(False)
         menu.addSeparator()
-        menu.addAction("Show App", lambda: self.show_app.emit())
-        menu.addAction("Open Dashboard", lambda: webbrowser.open("http://localhost:8501"))
+        menu.addAction("Uygulamayı Aç", lambda: self.show_app.emit())
+        menu.addAction("Dashboard Aç", lambda: webbrowser.open("http://localhost:8501"))
         menu.addSeparator()
-        self._start_action = menu.addAction("Start Cluster", self._start_cluster)
-        self._stop_action = menu.addAction("Stop Cluster", self._stop_cluster)
+        self._start_action = menu.addAction("Cluster Başlat", self._start_cluster)
+        self._stop_action = menu.addAction("Cluster Durdur", self._stop_cluster)
         menu.addSeparator()
-        self._status_action = menu.addAction("Status: Cluster Stopped")
+        self._status_action = menu.addAction("Durum: Cluster Durduruldu")
         self._status_action.setEnabled(False)
         menu.addSeparator()
-        menu.addAction("Quit", lambda: self.quit_app.emit())
+        menu.addAction("Çıkış", lambda: self.quit_app.emit())
         self.setContextMenu(menu)
 
     def update_cluster_state(self, running: bool):
         self._cluster_running = running
         self._start_action.setEnabled(not running)
         self._stop_action.setEnabled(running)
-        self._status_action.setText(f"Status: Cluster {'Running' if running else 'Stopped'}")
+        durum = "Çalışıyor" if running else "Durduruldu"
+        self._status_action.setText(f"Durum: Cluster {durum}")
 
     def _start_cluster(self):
         import threading
