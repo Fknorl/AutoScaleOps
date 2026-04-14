@@ -2820,6 +2820,80 @@ class StatusDot(QLabel):
         self.setStyleSheet(f"background-color: {self._color}; border-radius: 5px;")
 
 
+class NotificationBanner(QWidget):
+    """
+    Ekranın üstünde beliren, X ile kapatılabilen bildirim banner'ı.
+    Kullanım: banner.show_message("Mesaj", level="info"|"warning"|"success"|"error")
+    """
+    COLORS = {
+        "info":    {"bg": "rgba(99,102,241,0.18)",  "border": "#6366F1", "icon": "ℹ"},
+        "warning": {"bg": "rgba(251,191,36,0.15)",  "border": "#FBBF24", "icon": "⚠"},
+        "success": {"bg": "rgba(52,211,153,0.15)",  "border": "#34D399", "icon": "✓"},
+        "error":   {"bg": "rgba(248,113,113,0.15)", "border": "#F87171", "icon": "✕"},
+    }
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setVisible(False)
+        self.setFixedHeight(46)
+
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(16, 0, 12, 0)
+        lay.setSpacing(10)
+
+        self._icon_lbl = QLabel("ℹ")
+        self._icon_lbl.setFixedWidth(20)
+        self._icon_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._icon_lbl.setStyleSheet("background:transparent; border:none; font-size:15px;")
+
+        self._msg_lbl = QLabel("")
+        self._msg_lbl.setStyleSheet(f"color:{C_TEXT}; font-size:13px; background:transparent; border:none;")
+        self._msg_lbl.setWordWrap(False)
+
+        self._close_btn = QPushButton("✕")
+        self._close_btn.setFixedSize(24, 24)
+        self._close_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._close_btn.setStyleSheet(f"""
+            QPushButton {{
+                background: transparent;
+                color: {C_TEXT_DIM};
+                border: none;
+                font-size: 13px;
+                border-radius: 12px;
+            }}
+            QPushButton:hover {{
+                background: rgba(255,255,255,10);
+                color: {C_TEXT};
+            }}
+        """)
+        self._close_btn.clicked.connect(self.dismiss)
+
+        lay.addWidget(self._icon_lbl)
+        lay.addWidget(self._msg_lbl, 1)
+        lay.addWidget(self._close_btn)
+
+    def show_message(self, message: str, level: str = "info", auto_dismiss_ms: int = 0):
+        """Banner'ı göster. auto_dismiss_ms > 0 ise o süre sonra kapanır."""
+        cfg = self.COLORS.get(level, self.COLORS["info"])
+        self._icon_lbl.setText(cfg["icon"])
+        self._icon_lbl.setStyleSheet(
+            f"background:transparent; border:none; font-size:15px; color:{cfg['border']};"
+        )
+        self._msg_lbl.setText(message)
+        self.setStyleSheet(f"""
+            NotificationBanner {{
+                background: {cfg['bg']};
+                border-bottom: 1px solid {cfg['border']};
+            }}
+        """)
+        self.setVisible(True)
+        if auto_dismiss_ms > 0:
+            QTimer.singleShot(auto_dismiss_ms, self.dismiss)
+
+    def dismiss(self):
+        self.setVisible(False)
+
+
 def _add_shadow(widget: QWidget, blur: int = 20, offset_y: int = 4, alpha: int = 80):
     """Widget'a iOS-style yumuşak drop shadow ekle."""
     from PyQt6.QtWidgets import QGraphicsDropShadowEffect
@@ -7865,6 +7939,9 @@ class MainWindow(QMainWindow):
         right_lay.setSpacing(0)
         self._topbar = self._build_topbar()
         right_lay.addWidget(self._topbar)
+        # Bildirim banner'ı (topbar altında, content üstünde)
+        self._banner = NotificationBanner()
+        right_lay.addWidget(self._banner)
         # Content stack
         self._content_stack = QStackedWidget()
         right_lay.addWidget(self._content_stack)
@@ -7893,6 +7970,32 @@ class MainWindow(QMainWindow):
         # Workers setup
         self._setup_workers()
         self._nav_select(0)
+
+        # Başlangıç bildirimi — kullanıcıya sonraki adımı göster
+        QTimer.singleShot(800, self._show_startup_banner)
+
+    def show_banner(self, message: str, level: str = "info", auto_dismiss_ms: int = 0):
+        """Dışarıdan banner göstermek için public metod."""
+        self._banner.show_message(message, level=level, auto_dismiss_ms=auto_dismiss_ms)
+
+    def _show_startup_banner(self):
+        """Uygulama açılışında duruma göre bildirim göster."""
+        try:
+            cluster_running = getattr(self.ops, '_cluster_running', False)
+        except Exception:
+            cluster_running = False
+
+        if not cluster_running:
+            self._banner.show_message(
+                "Cluster henüz başlatılmadı. Ana Sayfa'dan 'Cluster Başlat' butonuna tıkla.",
+                level="warning"
+            )
+        else:
+            self._banner.show_message(
+                "Cluster çalışıyor. Dashboard'dan metrikleri takip edebilirsin.",
+                level="success",
+                auto_dismiss_ms=5000
+            )
 
     # ── Sidebar ───────────────────────────────
     def _build_sidebar(self) -> QWidget:
@@ -8176,6 +8279,18 @@ class MainWindow(QMainWindow):
         self._home_panel.update_cluster_status(running)
         if hasattr(self, "_tray"):
             self._tray.update_cluster_state(running)
+        # Banner bildirimi
+        if hasattr(self, "_banner"):
+            if running:
+                self._banner.show_message(
+                    "Cluster başarıyla çalışıyor. Dashboard'dan metrikleri takip edebilirsin.",
+                    level="success", auto_dismiss_ms=6000
+                )
+            else:
+                self._banner.show_message(
+                    "Cluster durduruldu. Tekrar başlatmak için Ana Sayfa'ya git.",
+                    level="warning"
+                )
 
     # ── Cluster actions ───────────────────────
     @pyqtSlot(str)
