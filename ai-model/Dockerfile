@@ -41,6 +41,8 @@ ENV SAFETY_BUFFER_PODS=2
 ENV FALSE_ALARM_TIMEOUT=300
 ENV FORECAST_HORIZON=5
 ENV CI_LEVEL=0.95
+ENV SOURCE_METRIC=http_requests_total
+ENV PREDICTION_METRIC=predicted_rps_30min
 
 # Run predictor
 CMD ["python", "-u", "predictor.py"]

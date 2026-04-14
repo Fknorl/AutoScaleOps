@@ -19,7 +19,8 @@ from .config import AutoScaleOpsConfig
 
 console = Console()
 
-CHARTS_DIR = Path(__file__).parent.parent / "charts" / "autoscaleops"
+CHARTS_DIR       = Path(__file__).parent.parent / "charts" / "autoscaleops"
+PREDICTOR_IMAGE  = "ghcr.io/fknorl/autoscaleops-predictor:latest"
 
 
 # ─── Yardımcılar ─────────────────────────────────────────────────────────────
@@ -101,6 +102,11 @@ def deploy_helm(cfg: AutoScaleOpsConfig, dry_run: bool = False):
         "--set", f"aiModel.env.pushgatewayUrl={cfg.pushgateway_url}",
         "--set", f"aiModel.env.forecastHorizon={cfg.forecast_horizon}",
         "--set", f"aiModel.env.ciLevel={cfg.ci_level}",
+        "--set", f"aiModel.env.sourceMetric={cfg.source_metric}",
+        "--set", f"aiModel.env.predictionMetric={cfg.prediction_metric}",
+        # Predictor image — ghcr.io'dan çekilir, local build gerekmez
+        "--set", f"aiModel.image={PREDICTOR_IMAGE}",
+        "--set", "aiModel.imagePullPolicy=Always",
     ]
 
     if dry_run:
