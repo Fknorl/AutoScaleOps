@@ -70,6 +70,7 @@ ASSETS_DIR = Path(getattr(sys, '_MEIPASS', Path(__file__).parent)) / "assets"
 NGROK_DIR = APP_DIR / "tools"
 NGROK_EXE = NGROK_DIR / "ngrok.exe"
 NGROK_URL = "https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-windows-amd64.zip"
+SETUP_COMPLETE_PATH = APP_DIR / "setup_complete.json"
 
 # Color palette — Liquid Glass / Midnight Aurora
 C_BG       = "#05050F"   # Liquid void — near-black with blue depth
@@ -3496,70 +3497,6 @@ class ShutdownDialog(QDialog):
         self.accept()
 
 
-class PinInput(QWidget):
-    pin_complete = pyqtSignal(str)
-
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        lay = QHBoxLayout(self)
-        lay.setSpacing(8)
-        lay.setContentsMargins(0, 0, 0, 0)
-        self._boxes = []
-        for i in range(6):
-            b = QLineEdit()
-            b.setFixedSize(48, 56)
-            b.setMaxLength(1)
-            b.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            b.setEchoMode(QLineEdit.EchoMode.Password)
-            b.setStyleSheet(f"QLineEdit {{ background: {C_SURFACE}; border: 2px solid {C_BORDER}; border-radius: 8px; font-size: 20px; color: {C_TEXT}; }} QLineEdit:focus {{ border-color: {C_ACCENT}; }}")
-            b.textChanged.connect(lambda text, idx=i: self._on_text(idx, text))
-            b.installEventFilter(self)
-            lay.addWidget(b)
-            self._boxes.append(b)
-
-    def eventFilter(self, obj, event):
-        from PyQt6.QtCore import QEvent
-        if event.type() == QEvent.Type.KeyPress:
-            if event.key() == Qt.Key.Key_Backspace:
-                for i, b in enumerate(self._boxes):
-                    if b is obj:
-                        if not b.text() and i > 0:
-                            self._boxes[i-1].setFocus()
-                            self._boxes[i-1].clear()
-                        else:
-                            b.clear()
-                        return True
-        return super().eventFilter(obj, event)
-
-    def _on_text(self, idx: int, text: str):
-        if text and not text.isdigit():
-            self._boxes[idx].clear()
-            return
-        if text and idx < 5:
-            self._boxes[idx+1].setFocus()
-        pin = self.get_pin()
-        if len(pin) == 6:
-            self.pin_complete.emit(pin)
-
-    def get_pin(self) -> str:
-        return "".join(b.text() for b in self._boxes)
-
-    def clear_all(self):
-        for b in self._boxes:
-            b.clear()
-        if self._boxes:
-            self._boxes[0].setFocus()
-
-    def set_error(self):
-        for b in self._boxes:
-            b.setStyleSheet(f"QLineEdit {{ background: {C_SURFACE}; border: 2px solid {C_RED}; border-radius: 8px; font-size: 20px; color: {C_RED}; }}")
-        QTimer.singleShot(1500, self._reset_style)
-
-    def _reset_style(self):
-        for b in self._boxes:
-            b.setStyleSheet(f"QLineEdit {{ background: {C_SURFACE}; border: 2px solid {C_BORDER}; border-radius: 8px; font-size: 20px; color: {C_TEXT}; }} QLineEdit:focus {{ border-color: {C_ACCENT}; }}")
-
-
 # ─────────────────────────────────────────────
 #  SCREEN 0 — SPLASH SCREEN
 # ─────────────────────────────────────────────
@@ -3593,28 +3530,142 @@ class SplashScreen(QWidget):
 
 
 
+
+# ─────────────────────────────────────────────
+#  KURULUM YARDIMCILARI
+# ─────────────────────────────────────────────
+class _InstallWorker(QThread):
+    progress  = pyqtSignal(str, str)
+    tool_done = pyqtSignal(str, bool)
+    all_done  = pyqtSignal(bool)
+
+    TOOLS = [
+        ("Python Paketleri", None, ["PyQt6","matplotlib","psutil","requests",
+                                    "cryptography","pyyaml","click","rich","jinja2",
+                                    "pmdarima","statsmodels","pandas","numpy"]),
+        ("Docker Desktop", "Docker.DockerDesktop",  []),
+        ("Minikube",       "Kubernetes.minikube",   []),
+        ("kubectl",        "Kubernetes.kubectl",    []),
+        ("Helm",           "Helm.Helm",             []),
+    ]
+
+    def __init__(self, missing: list, parent=None):
+        super().__init__(parent)
+        self._missing = set(missing)
+
+    def run(self):
+        overall_ok = True
+        no_win = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        for name, winget_id, pip_pkgs in self.TOOLS:
+            if name not in self._missing:
+                continue
+            self.progress.emit(f"Kuruluyor: {name}...", "info")
+            ok = False
+            try:
+                if pip_pkgs:
+                    cmd = [sys.executable, "-m", "pip", "install",
+                           "--upgrade", "--quiet"] + pip_pkgs
+                    proc = subprocess.Popen(
+                        cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                        text=True, errors="replace"
+                    )
+                    for line in iter(proc.stdout.readline, ""):
+                        line = line.strip()
+                        if line and "already" not in line.lower() and "warning" not in line.lower():
+                            self.progress.emit(f"   {line}", "info")
+                    proc.wait()
+                    ok = proc.returncode == 0
+                elif winget_id:
+                    cmd = ["winget", "install", "--id", winget_id, "-e",
+                           "--silent", "--accept-package-agreements",
+                           "--accept-source-agreements"]
+                    proc = subprocess.Popen(
+                        cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                        text=True, errors="replace", creationflags=no_win
+                    )
+                    for line in iter(proc.stdout.readline, ""):
+                        line = line.strip()
+                        if line:
+                            self.progress.emit(f"   {line}", "info")
+                    proc.wait()
+                    ok = proc.returncode in (0, -1978335189)
+            except Exception as e:
+                self.progress.emit(f"Hata: {e}", "error")
+                ok = False
+            lv = "ok" if ok else "warn"
+            msg = f"OK {name} kuruldu." if ok else f"UYARI {name} kurulamadi - elle kurun."
+            self.progress.emit(msg, lv)
+            if not ok:
+                overall_ok = False
+            self.tool_done.emit(name, ok)
+        self.all_done.emit(overall_ok)
+
+
+class _HelmWorker(QThread):
+    progress = pyqtSignal(str, str)
+    finished = pyqtSignal(bool, str)
+
+    HELM_STEPS = [
+        (["helm","repo","add","prometheus-community",
+          "https://prometheus-community.github.io/helm-charts"],
+         "Prometheus repo ekleniyor..."),
+        (["helm","repo","add","kedacore","https://kedacore.github.io/charts"],
+         "KEDA repo ekleniyor..."),
+        (["helm","repo","update"], "Repolar guncelleniyor..."),
+        (["helm","upgrade","--install","prometheus",
+          "prometheus-community/kube-prometheus-stack",
+          "-n","monitoring","--create-namespace",
+          "--set","grafana.enabled=false",
+          "--set","alertmanager.enabled=false",
+          "--wait","--timeout=5m"],
+         "Prometheus kuruluyor (1-3 dk)..."),
+        (["helm","upgrade","--install","pushgateway",
+          "prometheus-community/prometheus-pushgateway",
+          "-n","monitoring","--wait","--timeout=2m"],
+         "Pushgateway kuruluyor..."),
+        (["helm","upgrade","--install","keda","kedacore/keda",
+          "-n","keda","--create-namespace","--wait","--timeout=3m"],
+         "KEDA kuruluyor..."),
+    ]
+
+    def run(self):
+        no_win = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        for cmd, label in self.HELM_STEPS:
+            self.progress.emit(label, "info")
+            try:
+                proc = subprocess.Popen(
+                    cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                    text=True, errors="replace", creationflags=no_win
+                )
+                for line in iter(proc.stdout.readline, ""):
+                    line = line.strip()
+                    if line:
+                        self.progress.emit(f"   {line}", "info")
+                proc.wait()
+                if proc.returncode != 0:
+                    self.progress.emit(f"Uyari: adim basarisiz oldu.", "warn")
+            except FileNotFoundError:
+                self.finished.emit(False, "helm bulunamadi.")
+                return
+            except Exception as e:
+                self.progress.emit(f"Hata: {e}", "error")
+        self.progress.emit("Tum Helm chartlar kuruldu!", "ok")
+        self.finished.emit(True, "Helm kurulumlari tamamlandi.")
+
+
 # ─────────────────────────────────────────────
 #  SCREEN 1 — SETUP WIZARD
 # ─────────────────────────────────────────────
 class SetupWizard(QWidget):
     wizard_done = pyqtSignal()
-
-    PREREQ_LINKS = {
-        "Docker Desktop": "https://www.docker.com/products/docker-desktop",
-        "Docker Running": "https://www.docker.com/products/docker-desktop",
-        "Minikube": "https://minikube.sigs.k8s.io/docs/start/",
-        "kubectl": "https://kubernetes.io/docs/tasks/tools/",
-        "Helm": "https://helm.sh/docs/intro/install/",
-        "Python 3.11+": "https://www.python.org/downloads/",
-    }
+    STEP_NAMES  = ["Hos Geldin","Sistem Tespiti","Kurulum","Cluster","Helm","Hazir!"]
 
     def __init__(self, db, ops, parent=None):
         super().__init__(parent)
-        self.db = db
+        self.db  = db
         self.ops = ops
-        self._step = 0
-        self._prereq_ok = False
-        self._install_step_count = 0
+        self._missing_tools: list = []
+        self._tool_rows: dict = {}
         root = QVBoxLayout(self)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
@@ -3623,605 +3674,497 @@ class SetupWizard(QWidget):
         self._pages = QStackedWidget()
         root.addWidget(self._pages)
         self._pages.addWidget(self._build_welcome())
-        self._pages.addWidget(self._build_prereqs())
-        self._pages.addWidget(self._build_account())
-        self._pages.addWidget(self._build_pin_setup())
-        self._pages.addWidget(self._build_install())
-        self._set_step(0)
+        self._pages.addWidget(self._build_detect())
+        self._pages.addWidget(self._build_install_page())
+        self._pages.addWidget(self._build_cluster_page())
+        self._pages.addWidget(self._build_helm_page())
+        self._pages.addWidget(self._build_done())
+        self._go_to(0)
 
     def _build_step_bar(self) -> QWidget:
         w = QWidget()
-        w.setFixedHeight(60)
+        w.setFixedHeight(54)
         w.setStyleSheet(f"background:{C_SURFACE}; border-bottom:1px solid {C_BORDER};")
         lay = QHBoxLayout(w)
-        lay.setContentsMargins(32, 0, 32, 0)
-        steps = ["Welcome", "Prerequisites", "Account", "PIN Setup", "Installation"]
-        self._step_labels = []
-        for i, s in enumerate(steps):
-            vl = QVBoxLayout()
-            num = QLabel(str(i+1))
-            num.setFixedSize(28, 28)
+        lay.setContentsMargins(28, 0, 28, 0)
+        lay.setSpacing(0)
+        self._step_nums = []
+        self._step_lbls = []
+        for i, name in enumerate(self.STEP_NAMES):
+            col = QVBoxLayout()
+            col.setSpacing(1)
+            num = QLabel(str(i + 1))
+            num.setFixedSize(22, 22)
             num.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            num.setStyleSheet(f"background:{C_BORDER}; color:{C_TEXT_DIM}; border-radius:14px; font-weight:bold;")
-            lbl = QLabel(s)
+            num.setStyleSheet(
+                f"background:{C_BORDER}; color:{C_TEXT_DIM}; border-radius:11px; "
+                f"font-weight:700; font-size:10px;"
+            )
+            lbl = QLabel(name)
             lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            lbl.setStyleSheet(f"color:{C_TEXT_DIM}; font-size:11px;")
-            vl.addWidget(num, 0, Qt.AlignmentFlag.AlignCenter)
-            vl.addWidget(lbl, 0, Qt.AlignmentFlag.AlignCenter)
-            self._step_labels.append((num, lbl))
-            lay.addLayout(vl)
-            if i < len(steps)-1:
+            lbl.setStyleSheet(f"color:{C_TEXT_DIM}; font-size:9px;")
+            col.addWidget(num, 0, Qt.AlignmentFlag.AlignCenter)
+            col.addWidget(lbl, 0, Qt.AlignmentFlag.AlignCenter)
+            self._step_nums.append(num)
+            self._step_lbls.append(lbl)
+            lay.addLayout(col)
+            if i < len(self.STEP_NAMES) - 1:
                 sep = QFrame()
                 sep.setFrameShape(QFrame.Shape.HLine)
-                sep.setStyleSheet(f"color:{C_BORDER};")
+                sep.setFixedHeight(1)
+                sep.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+                sep.setStyleSheet(f"background:{C_BORDER}; border:none; margin:0 4px;")
                 lay.addWidget(sep)
         return w
 
-    def _set_step(self, idx: int):
-        self._step = idx
-        for i, (num, lbl) in enumerate(self._step_labels):
-            if i < idx:
-                num.setStyleSheet(f"background:{C_GREEN}; color:#fff; border-radius:14px; font-weight:bold;")
-                lbl.setStyleSheet(f"color:{C_GREEN}; font-size:11px;")
-            elif i == idx:
-                num.setStyleSheet(f"background:{C_ACCENT}; color:#fff; border-radius:14px; font-weight:bold;")
-                lbl.setStyleSheet(f"color:{C_ACCENT}; font-size:11px; font-weight:bold;")
+    def _go_to(self, step: int):
+        for i, (num, lbl) in enumerate(zip(self._step_nums, self._step_lbls)):
+            if i < step:
+                num.setStyleSheet(f"background:{C_GREEN}; color:#fff; border-radius:11px; font-weight:700; font-size:10px;")
+                lbl.setStyleSheet(f"color:{C_GREEN}; font-size:9px;")
+            elif i == step:
+                num.setStyleSheet(f"background:{C_ACCENT}; color:#fff; border-radius:11px; font-weight:700; font-size:10px;")
+                lbl.setStyleSheet(f"color:{C_ACCENT}; font-size:9px; font-weight:700;")
             else:
-                num.setStyleSheet(f"background:{C_BORDER}; color:{C_TEXT_DIM}; border-radius:14px; font-weight:bold;")
-                lbl.setStyleSheet(f"color:{C_TEXT_DIM}; font-size:11px;")
-        self._pages.setCurrentIndex(idx)
-        if idx == 1:
-            self._run_prereq_checks()
+                num.setStyleSheet(f"background:{C_BORDER}; color:{C_TEXT_DIM}; border-radius:11px; font-weight:700; font-size:10px;")
+                lbl.setStyleSheet(f"color:{C_TEXT_DIM}; font-size:9px;")
+        self._pages.setCurrentIndex(step)
 
     def _build_welcome(self) -> QWidget:
         w = QWidget()
         lay = QVBoxLayout(w)
         lay.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        lay.setSpacing(20)
-        lay.setContentsMargins(80, 40, 80, 40)
-        t = QLabel("Welcome to AutoScaleOps")
-        t.setStyleSheet(f"color:{C_TEXT}; font-size:28px; font-weight:bold;")
+        lay.setSpacing(0)
+        lay.setContentsMargins(100, 50, 100, 50)
+
+        icon_lbl = QLabel("A")
+        icon_lbl.setFixedSize(68, 68)
+        icon_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        icon_lbl.setStyleSheet(
+            f"background: qlineargradient(x1:0,y1:0,x2:1,y2:1,stop:0 #9BA8FA,stop:1 {C_ACCENT2});"
+            f"color:#fff; font-size:30px; font-weight:700; border-radius:20px;"
+        )
+        lay.addWidget(icon_lbl, 0, Qt.AlignmentFlag.AlignCenter)
+        lay.addSpacing(22)
+
+        t = QLabel("AutoScaleOps'a Hos Geldiniz")
+        t.setStyleSheet(f"color:{C_TEXT}; font-size:24px; font-weight:700;")
         t.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        sub = QLabel("AI-Powered Kubernetes Autoscaling for Your Local Machine")
-        sub.setStyleSheet(f"color:{C_ACCENT}; font-size:14px;")
+        sub = QLabel("AI destekli Kubernetes otomatik olcekleme platformu")
+        sub.setStyleSheet(f"color:{C_ACCENT}; font-size:13px;")
         sub.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        bullets = [
-            "  Monitors your web app traffic with Prometheus",
-            "  Predicts traffic spikes using ARIMA time series forecasting",
-            "  Automatically scales Kubernetes pods before spikes occur",
-            "  Runs entirely on your machine — no cloud costs",
-        ]
-        bw = QWidget()
-        bl = QVBoxLayout(bw)
-        bl.setSpacing(8)
-        for b in bullets:
-            lbl = QLabel(b)
-            lbl.setStyleSheet(f"color:{C_TEXT}; font-size:13px;")
-            bl.addWidget(lbl)
-        btn = QPushButton("Get Started  >")
-        btn.setObjectName("btn_primary")
-        btn.setFixedSize(200, 44)
-        btn.clicked.connect(lambda: self._set_step(1))
+        lay.addWidget(t)
+        lay.addSpacing(4)
+        lay.addWidget(sub)
+        lay.addSpacing(28)
+
+        feat_w = QFrame()
+        feat_w.setStyleSheet(
+            f"QFrame {{ background:{C_SURFACE}; border:1px solid rgba(255,255,255,0.07); border-radius:14px; }}"
+        )
+        feat_lay = QVBoxLayout(feat_w)
+        feat_lay.setContentsMargins(24, 16, 24, 16)
+        feat_lay.setSpacing(10)
+        for arrow, text in [
+            ("->", "Prometheus ile trafik izleme"),
+            ("->", "ARIMA ile trafik pigi tahmini"),
+            ("->", "KEDA ile otomatik pod olcekleme"),
+            ("->", "Tamamen yerel, bulut maliyeti yok"),
+        ]:
+            row = QHBoxLayout()
+            row.setSpacing(12)
+            ico = QLabel(arrow)
+            ico.setFixedWidth(18)
+            ico.setStyleSheet(f"color:{C_ACCENT}; font-size:11px; background:transparent; border:none;")
+            txt = QLabel(text)
+            txt.setStyleSheet(f"color:{C_TEXT}; font-size:13px; background:transparent; border:none;")
+            row.addWidget(ico)
+            row.addWidget(txt)
+            row.addStretch()
+            feat_lay.addLayout(row)
+        lay.addWidget(feat_w)
+        lay.addSpacing(30)
+
+        btn_start = QPushButton("  Kuruluma Basla  ->")
+        btn_start.setObjectName("btn_primary")
+        btn_start.setFixedHeight(46)
+        btn_start.setFixedWidth(220)
+        btn_start.clicked.connect(self._start_detection)
+        lay.addWidget(btn_start, 0, Qt.AlignmentFlag.AlignCenter)
+        lay.addSpacing(10)
+
+        skip_btn = QPushButton("Zaten kurulu, atla ->")
+        skip_btn.setStyleSheet(
+            f"color:{C_TEXT_DIM}; background:transparent; border:none; font-size:12px;"
+        )
+        skip_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        skip_btn.clicked.connect(self._skip_all)
+        lay.addWidget(skip_btn, 0, Qt.AlignmentFlag.AlignCenter)
+        return w
+
+    def _build_detect(self) -> QWidget:
+        w = QWidget()
+        lay = QVBoxLayout(w)
+        lay.setContentsMargins(60, 32, 60, 32)
+        lay.setSpacing(10)
+        t = QLabel("Sistem Tespiti")
+        t.setStyleSheet(f"color:{C_TEXT}; font-size:20px; font-weight:700;")
+        sub = QLabel("Gerekli araclar kontrol ediliyor, lutfen bekleyin...")
+        sub.setStyleSheet(f"color:{C_TEXT_DIM}; font-size:13px;")
         lay.addWidget(t)
         lay.addWidget(sub)
-        lay.addSpacing(16)
-        lay.addWidget(bw, 0, Qt.AlignmentFlag.AlignCenter)
-        lay.addSpacing(24)
-        lay.addWidget(btn, 0, Qt.AlignmentFlag.AlignCenter)
-        return w
+        lay.addSpacing(6)
 
-    def _build_prereqs(self) -> QWidget:
-        w = QWidget()
-        lay = QVBoxLayout(w)
-        lay.setContentsMargins(80, 40, 80, 40)
-        lay.setSpacing(12)
-        lay.addWidget(SectionTitle("Prerequisites Check"))
-        sub = QLabel("AutoScaleOps requires the following tools. Install any that are missing before continuing.")
-        sub.setStyleSheet(f"color:{C_TEXT_DIM};")
-        sub.setWordWrap(True)
-        lay.addWidget(sub)
-        lay.addSpacing(8)
-        self._prereq_rows = {}
-        names = ["Docker Desktop", "Docker Running", "Minikube", "kubectl", "Helm", "Python 3.11+"]
-        for name in names:
-            lay.addWidget(self._make_prereq_row(name))
+        self._tool_rows = {}
+        for name, desc in [
+            ("Python Paketleri", "PyQt6, matplotlib, psutil, requests ve digerleri"),
+            ("Docker Desktop",   "Konteyner calisma ortami"),
+            ("Minikube",         "Yerel Kubernetes cluster"),
+            ("kubectl",          "Kubernetes komut satiri araci"),
+            ("Helm",             "Kubernetes paket yoneticisi"),
+        ]:
+            row = QFrame()
+            row.setStyleSheet(
+                f"QFrame {{ background:{C_SURFACE2}; border:1px solid rgba(255,255,255,0.07); border-radius:10px; }}"
+            )
+            rl = QHBoxLayout(row)
+            rl.setContentsMargins(16, 10, 16, 10)
+            rl.setSpacing(10)
+            dot = StatusDot(C_TEXT_DIM)
+            name_col = QVBoxLayout()
+            name_col.setSpacing(1)
+            name_lbl = QLabel(name)
+            name_lbl.setStyleSheet(f"color:{C_TEXT}; font-size:13px; background:transparent; border:none;")
+            desc_lbl = QLabel(desc)
+            desc_lbl.setStyleSheet(f"color:{C_TEXT_DIM}; font-size:10px; background:transparent; border:none;")
+            name_col.addWidget(name_lbl)
+            name_col.addWidget(desc_lbl)
+            ver_lbl = QLabel("Bekleniyor...")
+            ver_lbl.setStyleSheet(f"color:{C_TEXT_DIM}; font-size:12px; background:transparent; border:none;")
+            ver_lbl.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            rl.addWidget(dot)
+            rl.addSpacing(4)
+            rl.addLayout(name_col, 1)
+            rl.addWidget(ver_lbl)
+            self._tool_rows[name] = {"dot": dot, "ver": ver_lbl}
+            lay.addWidget(row)
+
+        lay.addStretch()
         btn_row = QHBoxLayout()
-        self._btn_check_again = QPushButton("Check Again")
-        self._btn_check_again.clicked.connect(self._run_prereq_checks)
-        self._btn_prereq_continue = QPushButton("Continue")
-        self._btn_prereq_continue.setObjectName("btn_primary")
-        self._btn_prereq_continue.setEnabled(False)
-        self._btn_prereq_continue.clicked.connect(lambda: self._set_step(2))
+        self._btn_recheck = QPushButton("Tekrar Kontrol")
+        self._btn_recheck.clicked.connect(self._start_detection)
+        self._btn_detect_next = QPushButton("Devam ->")
+        self._btn_detect_next.setObjectName("btn_primary")
+        self._btn_detect_next.setEnabled(False)
+        self._btn_detect_next.clicked.connect(self._after_detection)
         btn_row.addStretch()
-        btn_row.addWidget(self._btn_check_again)
-        btn_row.addWidget(self._btn_prereq_continue)
-        lay.addSpacing(16)
+        btn_row.addWidget(self._btn_recheck)
+        btn_row.addWidget(self._btn_detect_next)
         lay.addLayout(btn_row)
-        lay.addStretch()
         return w
 
-    def _make_prereq_row(self, name: str) -> QWidget:
-        row = QFrame()
-        row.setStyleSheet(f"background:{C_SURFACE}; border:1px solid {C_BORDER}; border-radius:8px;")
-        rl = QHBoxLayout(row)
-        rl.setContentsMargins(16, 10, 16, 10)
-        dot = StatusDot()
-        lbl = QLabel(name)
-        lbl.setStyleSheet(f"color:{C_TEXT}; font-size:13px;")
-        ver = QLabel("Not checked")
-        ver.setStyleSheet(f"color:{C_TEXT_DIM}; font-size:12px;")
-        link = QPushButton("Download")
-        link.setStyleSheet(f"color:{C_ACCENT}; background:transparent; border:none; font-size:12px;")
-        link.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        link.setVisible(False)
-        url = self.PREREQ_LINKS.get(name, "")
-        link.clicked.connect(lambda checked, u=url: webbrowser.open(u))
-        rl.addWidget(dot)
-        rl.addSpacing(8)
-        rl.addWidget(lbl)
-        rl.addStretch()
-        rl.addWidget(ver)
-        rl.addWidget(link)
-        self._prereq_rows[name] = {"dot": dot, "ver": ver, "link": link}
-        return row
-
-    def _run_prereq_checks(self):
-        self._btn_prereq_continue.setEnabled(False)
-        for name, row in self._prereq_rows.items():
-            row["dot"].set_color(C_YELLOW)
-            row["ver"].setText("Checking...")
-            row["link"].setVisible(False)
-        def check_and_update():
-            results = self.ops.all_prereq_checks()
-            all_ok = True
-            for res in results:
-                name = res["name"]
-                if name not in self._prereq_rows:
-                    continue
-                row = self._prereq_rows[name]
-                if res["ok"]:
-                    row["dot"].set_color(C_GREEN)
-                    row["ver"].setText(res["version"] or "OK")
-                    row["link"].setVisible(False)
-                else:
-                    row["dot"].set_color(C_RED)
-                    row["ver"].setText("Not found")
-                    row["link"].setVisible(True)
-                    all_ok = False
-            self._prereq_ok = all_ok
-            self._btn_prereq_continue.setEnabled(all_ok)
-        import threading
-        threading.Thread(target=check_and_update, daemon=True).start()
-
-    def _build_account(self) -> QWidget:
+    def _build_install_page(self) -> QWidget:
         w = QWidget()
         lay = QVBoxLayout(w)
-        lay.setContentsMargins(80, 40, 80, 40)
-        lay.setSpacing(12)
-        lay.addWidget(SectionTitle("Create Your Account"))
-        sub = QLabel("Your account is stored locally on this machine. No data is sent to any server.")
-        sub.setStyleSheet(f"color:{C_TEXT_DIM};")
+        lay.setContentsMargins(48, 28, 48, 28)
+        lay.setSpacing(10)
+        t = QLabel("Otomatik Kurulum")
+        t.setStyleSheet(f"color:{C_TEXT}; font-size:20px; font-weight:700;")
+        sub = QLabel("Eksik araclar otomatik kuruluyor. Bu islem 5-10 dakika surebilir.")
+        sub.setStyleSheet(f"color:{C_TEXT_DIM}; font-size:13px;")
         sub.setWordWrap(True)
+        lay.addWidget(t)
         lay.addWidget(sub)
-        lay.addSpacing(8)
-        self._f_name = QLineEdit()
-        self._f_name.setPlaceholderText("Full name")
-        self._f_email = QLineEdit()
-        self._f_email.setPlaceholderText("Email address")
-        self._f_pass = QLineEdit()
-        self._f_pass.setPlaceholderText("Password (min 6 chars)")
-        self._f_pass.setEchoMode(QLineEdit.EchoMode.Password)
-        self._f_confirm = QLineEdit()
-        self._f_confirm.setPlaceholderText("Confirm password")
-        self._f_confirm.setEchoMode(QLineEdit.EchoMode.Password)
-        tier_group = QGroupBox("Plan")
-        tl = QVBoxLayout(tier_group)
-        self._rb_free = QRadioButton("Free — ngrok tunnel, 1 domain")
-        self._rb_starter = QRadioButton("Starter ($9/mo) — Cloudflare tunnel, 3 domains")
-        self._rb_free.setChecked(True)
-        tl.addWidget(self._rb_free)
-        tl.addWidget(self._rb_starter)
-        self._lbl_acct_err = QLabel("")
-        self._lbl_acct_err.setStyleSheet(f"color:{C_RED};")
-        btn = QPushButton("Create Account")
-        btn.setObjectName("btn_primary")
-        btn.setFixedHeight(40)
-        btn.clicked.connect(self._create_account)
-        for f in [self._f_name, self._f_email, self._f_pass, self._f_confirm]:
-            lay.addWidget(f)
-        lay.addWidget(tier_group)
-        lay.addWidget(self._lbl_acct_err)
-        lay.addWidget(btn)
-        lay.addStretch()
+        lay.addSpacing(4)
+        self._install_pb = QProgressBar()
+        self._install_pb.setRange(0, 0)
+        self._install_pb.setFixedHeight(5)
+        lay.addWidget(self._install_pb)
+        self._install_status = QLabel("Basliyor...")
+        self._install_status.setStyleSheet(f"color:{C_ACCENT}; font-size:12px;")
+        lay.addWidget(self._install_status)
+        self._install_log = LogWidget()
+        self._install_log.setMinimumHeight(260)
+        lay.addWidget(self._install_log)
+        btn_row = QHBoxLayout()
+        self._btn_install_retry = QPushButton("Tekrar Dene")
+        self._btn_install_retry.setVisible(False)
+        self._btn_install_retry.clicked.connect(self._run_install)
+        self._btn_install_next = QPushButton("Devam ->")
+        self._btn_install_next.setObjectName("btn_primary")
+        self._btn_install_next.setEnabled(False)
+        self._btn_install_next.clicked.connect(
+            lambda: (self._go_to(3), QTimer.singleShot(300, self._run_cluster_setup))
+        )
+        btn_row.addStretch()
+        btn_row.addWidget(self._btn_install_retry)
+        btn_row.addWidget(self._btn_install_next)
+        lay.addLayout(btn_row)
         return w
 
-    def _create_account(self):
-        name = self._f_name.text().strip()
-        email = self._f_email.text().strip()
-        pw = self._f_pass.text()
-        cpw = self._f_confirm.text()
-        if not name or not email or not pw:
-            self._lbl_acct_err.setText("All fields are required.")
-            return
-        if len(pw) < 6:
-            self._lbl_acct_err.setText("Password must be at least 6 characters.")
-            return
-        if pw != cpw:
-            self._lbl_acct_err.setText("Passwords do not match.")
-            return
-        if "@" not in email:
-            self._lbl_acct_err.setText("Invalid email address.")
-            return
-        tier = "starter" if self._rb_starter.isChecked() else "free"
-        ok = self.db.save_user(name, email, pw, tier)
-        if not ok:
-            self._lbl_acct_err.setText("Failed to save account. Email may already be in use.")
-            return
-        self.db.log_activity("account_created", f"Account created for {email}")
-        self._lbl_acct_err.setText("")
-        self._set_step(3)
+    def _build_cluster_page(self) -> QWidget:
+        w = QWidget()
+        lay = QVBoxLayout(w)
+        lay.setContentsMargins(48, 28, 48, 28)
+        lay.setSpacing(10)
+        t = QLabel("Cluster Kurulumu")
+        t.setStyleSheet(f"color:{C_TEXT}; font-size:20px; font-weight:700;")
+        sub = QLabel(
+            "Minikube cluster baslatiliyor. Ilk kurulumda 2-5 dakika surebilir. "
+            "Docker Desktop acik olmalidir."
+        )
+        sub.setStyleSheet(f"color:{C_TEXT_DIM}; font-size:13px;")
+        sub.setWordWrap(True)
+        lay.addWidget(t)
+        lay.addWidget(sub)
+        lay.addSpacing(4)
+        self._cluster_pb = QProgressBar()
+        self._cluster_pb.setRange(0, 0)
+        self._cluster_pb.setFixedHeight(5)
+        lay.addWidget(self._cluster_pb)
+        self._cluster_status_lbl = QLabel("Cluster bekleniyor...")
+        self._cluster_status_lbl.setStyleSheet(f"color:{C_ACCENT}; font-size:12px;")
+        lay.addWidget(self._cluster_status_lbl)
+        self._cluster_log = LogWidget()
+        self._cluster_log.setMinimumHeight(260)
+        lay.addWidget(self._cluster_log)
+        btn_row = QHBoxLayout()
+        self._btn_cluster_retry = QPushButton("Tekrar Dene")
+        self._btn_cluster_retry.setVisible(False)
+        self._btn_cluster_retry.clicked.connect(self._run_cluster_setup)
+        self._btn_cluster_next = QPushButton("Devam ->")
+        self._btn_cluster_next.setObjectName("btn_primary")
+        self._btn_cluster_next.setEnabled(False)
+        self._btn_cluster_next.clicked.connect(
+            lambda: (self._go_to(4), QTimer.singleShot(300, self._run_helm))
+        )
+        btn_row.addStretch()
+        btn_row.addWidget(self._btn_cluster_retry)
+        btn_row.addWidget(self._btn_cluster_next)
+        lay.addLayout(btn_row)
+        return w
 
-    def _build_pin_setup(self) -> QWidget:
+    def _build_helm_page(self) -> QWidget:
+        w = QWidget()
+        lay = QVBoxLayout(w)
+        lay.setContentsMargins(48, 28, 48, 28)
+        lay.setSpacing(10)
+        t = QLabel("Helm Chart Kurulumu")
+        t.setStyleSheet(f"color:{C_TEXT}; font-size:20px; font-weight:700;")
+        sub = QLabel("Prometheus, Pushgateway ve KEDA kuruluyor (5-10 dk).")
+        sub.setStyleSheet(f"color:{C_TEXT_DIM}; font-size:13px;")
+        lay.addWidget(t)
+        lay.addWidget(sub)
+        lay.addSpacing(4)
+        self._helm_pb = QProgressBar()
+        self._helm_pb.setRange(0, 0)
+        self._helm_pb.setFixedHeight(5)
+        lay.addWidget(self._helm_pb)
+        self._helm_status_lbl = QLabel("Basliyor...")
+        self._helm_status_lbl.setStyleSheet(f"color:{C_ACCENT}; font-size:12px;")
+        lay.addWidget(self._helm_status_lbl)
+        self._helm_log = LogWidget()
+        self._helm_log.setMinimumHeight(260)
+        lay.addWidget(self._helm_log)
+        btn_row = QHBoxLayout()
+        self._btn_helm_retry = QPushButton("Tekrar Dene")
+        self._btn_helm_retry.setVisible(False)
+        self._btn_helm_retry.clicked.connect(self._run_helm)
+        self._btn_helm_next = QPushButton("Tamamla ->")
+        self._btn_helm_next.setObjectName("btn_success")
+        self._btn_helm_next.setEnabled(False)
+        self._btn_helm_next.clicked.connect(lambda: self._go_to(5))
+        btn_row.addStretch()
+        btn_row.addWidget(self._btn_helm_retry)
+        btn_row.addWidget(self._btn_helm_next)
+        lay.addLayout(btn_row)
+        return w
+
+    def _build_done(self) -> QWidget:
         w = QWidget()
         lay = QVBoxLayout(w)
         lay.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        lay.setContentsMargins(80, 40, 80, 40)
         lay.setSpacing(16)
-        t = SectionTitle("Set Your PIN")
+        lay.setContentsMargins(100, 60, 100, 60)
+        check = QLabel("OK!")
+        check.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        check.setStyleSheet(
+            f"color:{C_GREEN}; font-size:48px; font-weight:700; "
+            f"background:transparent; border:none;"
+        )
+        lay.addWidget(check)
+        t = QLabel("Kurulum Tamamlandi!")
         t.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        sub = QLabel("Set a 6-digit PIN. You will enter this every time you open AutoScaleOps.")
+        t.setStyleSheet(f"color:{C_TEXT}; font-size:24px; font-weight:700;")
+        sub = QLabel("AutoScaleOps kullanima hazir.")
         sub.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        sub.setWordWrap(True)
-        sub.setStyleSheet(f"color:{C_TEXT_DIM};")
-        self._pin_input_1 = PinInput()
-        self._pin_input_2 = PinInput()
-        self._pin_err = QLabel("")
-        self._pin_err.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._pin_err.setStyleSheet(f"color:{C_RED};")
-        btn = QPushButton("Save PIN and Continue")
-        btn.setObjectName("btn_primary")
-        btn.setFixedSize(220, 44)
-        btn.clicked.connect(self._save_pin)
+        sub.setStyleSheet(f"color:{C_TEXT_DIM}; font-size:13px;")
         lay.addWidget(t)
         lay.addWidget(sub)
-        lay.addSpacing(8)
-        lay.addWidget(QLabel("Enter PIN:"))
-        lay.addWidget(self._pin_input_1, 0, Qt.AlignmentFlag.AlignCenter)
-        lay.addSpacing(8)
-        lay.addWidget(QLabel("Confirm PIN:"))
-        lay.addWidget(self._pin_input_2, 0, Qt.AlignmentFlag.AlignCenter)
-        lay.addWidget(self._pin_err)
-        lay.addSpacing(16)
+        lay.addSpacing(32)
+        btn = QPushButton("  Uygulamayi Ac  ->")
+        btn.setObjectName("btn_success")
+        btn.setFixedHeight(48)
+        btn.setFixedWidth(220)
+        btn.clicked.connect(self._finish_setup)
         lay.addWidget(btn, 0, Qt.AlignmentFlag.AlignCenter)
         return w
 
-    def _save_pin(self):
-        p1 = self._pin_input_1.get_pin()
-        p2 = self._pin_input_2.get_pin()
-        if len(p1) != 6:
-            self._pin_err.setText("Enter all 6 digits for PIN.")
-            return
-        if p1 != p2:
-            self._pin_err.setText("PINs do not match.")
-            return
-        user = self.db.get_user()
-        if user:
-            self.db.set_pin(user["id"], p1)
-        self._pin_err.setText("")
-        self._set_step(4)
+    def _start_detection(self):
+        self._go_to(1)
+        self._btn_detect_next.setEnabled(False)
+        for row in self._tool_rows.values():
+            row["dot"].set_color(C_YELLOW)
+            row["ver"].setText("Kontrol ediliyor...")
 
-    def _build_install(self) -> QWidget:
-        w = QWidget()
-        lay = QVBoxLayout(w)
-        lay.setContentsMargins(40, 24, 40, 24)
-        lay.setSpacing(12)
-        lay.addWidget(SectionTitle("Installing AutoScaleOps"))
-        sub = QLabel("Setting up your Kubernetes cluster and AI autoscaling system.")
-        sub.setStyleSheet(f"color:{C_TEXT_DIM};")
-        sub.setWordWrap(True)
-        self._step_lbl = QLabel("Waiting to start...")
-        self._step_lbl.setStyleSheet(f"color:{C_ACCENT};")
-        self._install_pb = QProgressBar()
-        self._install_pb.setRange(0, 100)
-        self._install_pb.setValue(0)
-        self._install_log = LogWidget()
-        self._install_log.setMinimumHeight(280)
-        btn_row = QHBoxLayout()
-        self._btn_install_start = QPushButton("Start Installation")
-        self._btn_install_start.setObjectName("btn_primary")
-        self._btn_install_start.clicked.connect(self._start_install)
-        self._btn_install_skip = QPushButton("Skip (Already Installed)")
-        self._btn_install_skip.clicked.connect(self._skip_and_start)
-        self._btn_install_finish = QPushButton("Open Dashboard and Finish")
-        self._btn_install_finish.setObjectName("btn_success")
-        self._btn_install_finish.setVisible(False)
-        self._btn_install_finish.clicked.connect(self._open_and_finish)
-        btn_row.addWidget(self._btn_install_start)
-        btn_row.addWidget(self._btn_install_skip)
-        btn_row.addStretch()
-        btn_row.addWidget(self._btn_install_finish)
-        lay.addWidget(sub)
-        lay.addWidget(self._step_lbl)
-        lay.addWidget(self._install_pb)
-        lay.addWidget(self._install_log)
-        lay.addLayout(btn_row)
-        return w
+        def _detect():
+            results = self.ops.all_prereq_checks()
+            self._missing_tools = []
+            for res in results:
+                name = res["name"]
+                if name not in self._tool_rows:
+                    continue
+                ok  = res["ok"]
+                ver = res.get("version") or ("OK" if ok else "Bulunamadi")
+                col = C_GREEN if ok else C_RED
+                _n, _v, _c = name, ver, col
+                QTimer.singleShot(0, lambda n=_n, v=_v, c=_c: self._update_tool_row(n, v, c))
+                if not ok:
+                    self._missing_tools.append(name)
+            QTimer.singleShot(200, self._on_detection_done)
 
-    def _start_install(self):
-        self._btn_install_start.setEnabled(False)
-        self._btn_install_skip.setEnabled(False)
-        self._install_pb.setValue(0)
-        self._install_step_count = 0
-        self._install_thread = QThread(self)
-        self._install_worker = ClusterWorker(self.ops, "start")
-        self._install_worker.moveToThread(self._install_thread)
-        self._install_thread.started.connect(self._install_worker.run)
+        import threading
+        threading.Thread(target=_detect, daemon=True).start()
+
+    def _update_tool_row(self, name: str, ver: str, color: str):
+        if name in self._tool_rows:
+            self._tool_rows[name]["dot"].set_color(color)
+            self._tool_rows[name]["ver"].setText(ver)
+
+    def _on_detection_done(self):
+        self._btn_detect_next.setEnabled(True)
+
+    def _after_detection(self):
+        if self._missing_tools:
+            self._go_to(2)
+            QTimer.singleShot(300, self._run_install)
+        else:
+            self._go_to(3)
+            QTimer.singleShot(300, self._run_cluster_setup)
+
+    def _run_install(self):
+        self._install_log.clear()
+        self._install_status.setText("Kurulum basliyor...")
+        self._btn_install_retry.setVisible(False)
+        self._btn_install_next.setEnabled(False)
+        self._install_pb.setRange(0, 0)
+        self._install_worker = _InstallWorker(self._missing_tools)
         self._install_worker.progress.connect(self._on_install_progress)
-        self._install_worker.finished.connect(self._on_install_done)
-        self._install_worker.finished.connect(self._install_thread.quit)
-        self._install_thread.start()
+        self._install_worker.tool_done.connect(self._on_install_tool_done)
+        self._install_worker.all_done.connect(self._on_install_all_done)
+        self._install_worker.start()
 
     @pyqtSlot(str, str)
     def _on_install_progress(self, msg: str, level: str):
         self._install_log.append_line(msg, level)
-        self._step_lbl.setText(msg)
-        self._install_step_count += 1
-        self._install_pb.setValue(min(95, self._install_step_count * 8))
+        self._install_status.setText(msg[:90])
+
+    @pyqtSlot(str, bool)
+    def _on_install_tool_done(self, name: str, ok: bool):
+        if name in self._tool_rows:
+            self._tool_rows[name]["dot"].set_color(C_GREEN if ok else C_RED)
+
+    @pyqtSlot(bool)
+    def _on_install_all_done(self, ok: bool):
+        self._install_pb.setRange(0, 1)
+        self._install_pb.setValue(1)
+        if ok:
+            self._install_status.setText("Tum araclar kuruldu!")
+            self._btn_install_next.setEnabled(True)
+            QTimer.singleShot(800, lambda: self._go_to(3))
+            QTimer.singleShot(1200, self._run_cluster_setup)
+        else:
+            self._install_status.setText("Bazi araclar kurulamadi, elle kurulum gerekebilir.")
+            self._btn_install_retry.setVisible(True)
+            self._btn_install_next.setEnabled(True)
+
+    def _run_cluster_setup(self):
+        self._cluster_log.clear()
+        self._cluster_status_lbl.setText("Cluster baslatiliyor...")
+        self._btn_cluster_retry.setVisible(False)
+        self._btn_cluster_next.setEnabled(False)
+        self._cluster_pb.setRange(0, 0)
+        self._cluster_thread = QThread(self)
+        self._cluster_worker_wiz = ClusterWorker(self.ops, "start")
+        self._cluster_worker_wiz.moveToThread(self._cluster_thread)
+        self._cluster_thread.started.connect(self._cluster_worker_wiz.run)
+        self._cluster_worker_wiz.progress.connect(self._on_cluster_progress)
+        self._cluster_worker_wiz.finished.connect(self._on_cluster_done)
+        self._cluster_worker_wiz.finished.connect(self._cluster_thread.quit)
+        self._cluster_thread.start()
+
+    @pyqtSlot(str, str)
+    def _on_cluster_progress(self, msg: str, level: str):
+        self._cluster_log.append_line(msg, level)
+        self._cluster_status_lbl.setText(msg[:90])
 
     @pyqtSlot(bool, str)
-    def _on_install_done(self, ok: bool, msg: str):
-        self._install_pb.setValue(100)
-        self._install_log.append_line(msg, "ok" if ok else "error")
-        self._btn_install_finish.setVisible(True)
-        self.db.log_activity("cluster_start", "Installation completed" if ok else f"Installation failed: {msg}")
+    def _on_cluster_done(self, ok: bool, msg: str):
+        self._cluster_pb.setRange(0, 1)
+        self._cluster_pb.setValue(1)
+        if ok:
+            self._cluster_status_lbl.setText("Cluster hazir!")
+            self._btn_cluster_next.setEnabled(True)
+            QTimer.singleShot(800, lambda: self._go_to(4))
+            QTimer.singleShot(1200, self._run_helm)
+        else:
+            self._cluster_status_lbl.setText(f"Cluster baslatılamadi: {msg}")
+            self._btn_cluster_retry.setVisible(True)
+            self._btn_cluster_next.setEnabled(True)
 
-    def _skip_and_start(self):
-        """Skip butonuna basıldığında: mevcut cluster'ı akıllıca başlat
-        (zaten kurulu olanları es geçer), sonra wizard'ı bitir."""
-        self._btn_install_skip.setEnabled(False)
-        self._btn_install_skip.setText("Starting services…")
-        self._skip_thread = QThread(self)
-        self._skip_worker = ClusterWorker(self.ops, "start")
-        self._skip_worker.moveToThread(self._skip_thread)
-        self._skip_thread.started.connect(self._skip_worker.run)
-        self._skip_worker.progress.connect(lambda msg, lvl: None)  # sessiz — log gösterme
-        self._skip_worker.finished.connect(self._on_skip_done)
-        self._skip_worker.finished.connect(self._skip_thread.quit)
-        self._skip_thread.start()
+    def _run_helm(self):
+        self._helm_log.clear()
+        self._helm_status_lbl.setText("Helm chartlar kuruluyor...")
+        self._btn_helm_retry.setVisible(False)
+        self._btn_helm_next.setEnabled(False)
+        self._helm_pb.setRange(0, 0)
+        self._helm_worker = _HelmWorker()
+        self._helm_worker.progress.connect(self._on_helm_progress)
+        self._helm_worker.finished.connect(self._on_helm_done)
+        self._helm_worker.start()
+
+    @pyqtSlot(str, str)
+    def _on_helm_progress(self, msg: str, level: str):
+        self._helm_log.append_line(msg, level)
+        self._helm_status_lbl.setText(msg[:90])
 
     @pyqtSlot(bool, str)
-    def _on_skip_done(self, ok: bool, msg: str):
-        """Skip tamamlandığında: dashboard aç, wizard'ı bitir."""
-        self.ops.open_dashboard_browser()
+    def _on_helm_done(self, ok: bool, msg: str):
+        self._helm_pb.setRange(0, 1)
+        self._helm_pb.setValue(1)
+        if ok:
+            self._helm_status_lbl.setText("Helm kurulumlari tamamlandi!")
+            self._btn_helm_next.setEnabled(True)
+            QTimer.singleShot(800, lambda: self._go_to(5))
+        else:
+            self._helm_status_lbl.setText("Bazi chartlar kurulamadi.")
+            self._btn_helm_retry.setVisible(True)
+            self._btn_helm_next.setEnabled(True)
+
+    def _skip_all(self):
         self._finish_setup()
 
-    def _open_and_finish(self):
-        # Dashboard zaten hazırsa anında aç
-        if self.ops.check_dashboard():
-            self.ops.open_dashboard_browser()
-            self._finish_setup()
-            return
-        # Port forward'ları başlat (per-port akıllı — zaten açıkları atlar)
-        instance = self.ops.get_instance()
-        if instance:
-            namespace = instance.get("namespace", "autoscaleops")
-            self.ops.start_port_forwards(namespace)
-        # Streamlit process'i başlat (idempotent — zaten çalışıyorsa dokunmaz)
-        self.ops.start_dashboard()
-        # UI thread'ini bloke etmeden QTimer ile 1 sn'de bir kontrol et
-        self._dash_wait_count = 0
-        self._dash_wait_timer = QTimer(self)
-        self._dash_wait_timer.timeout.connect(self._poll_dashboard_ready)
-        self._dash_wait_timer.start(1000)
-
-    @pyqtSlot()
-    def _poll_dashboard_ready(self):
-        """QTimer callback: Dashboard hazır mı her saniye kontrol et (maks 30 sn)."""
-        self._dash_wait_count += 1
-        if self.ops.check_dashboard() or self._dash_wait_count >= 30:
-            self._dash_wait_timer.stop()
-            self._dash_wait_timer = None
-            self.ops.open_dashboard_browser()
-            self._finish_setup()
-
     def _finish_setup(self):
+        try:
+            SETUP_COMPLETE_PATH.write_text(
+                json.dumps({"completed_at": datetime.now().isoformat(), "version": APP_VERSION}),
+                encoding="utf-8"
+            )
+        except Exception:
+            pass
         self.wizard_done.emit()
 
 
-
-# ─────────────────────────────────────────────
-#  SCREEN 3 — PIN ENTRY
-# ─────────────────────────────────────────────
-class PinScreen(QWidget):
-    pin_accepted = pyqtSignal()
-
-    def __init__(self, db, parent=None):
-        super().__init__(parent)
-        self.db = db
-        lay = QVBoxLayout(self)
-        lay.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        lay.setSpacing(20)
-        lay.setContentsMargins(0, 0, 0, 0)
-
-        logo = QLabel(APP_NAME)
-        logo.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        logo.setStyleSheet(f"color:{C_TEXT}; font-size:28px; font-weight:bold; letter-spacing:2px;")
-
-        self._avatar_lbl = QLabel()
-        self._avatar_lbl.setFixedSize(72, 72)
-        self._avatar_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._avatar_lbl.setStyleSheet(f"border-radius:36px; background:{C_SURFACE}; border:2px solid {C_BORDER};")
-
-        self._welcome_lbl = QLabel("Welcome back!")
-        self._welcome_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._welcome_lbl.setStyleSheet(f"color:{C_TEXT}; font-size:18px; font-weight:bold;")
-
-        hint = QLabel("Enter your 6-digit PIN")
-        hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        hint.setStyleSheet(f"color:{C_TEXT_DIM}; font-size:13px;")
-
-        self._pin_input = PinInput()
-        self._pin_input.pin_complete.connect(self._check_pin)
-
-        self._err_lbl = QLabel("")
-        self._err_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._err_lbl.setStyleSheet(f"color:{C_RED}; font-size:12px;")
-
-        self._countdown_lbl = QLabel("")
-        self._countdown_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._countdown_lbl.setStyleSheet(f"color:{C_YELLOW}; font-size:12px;")
-
-        forgot = QPushButton("Forgot PIN?")
-        forgot.setStyleSheet(f"color:{C_ACCENT}; background:transparent; border:none;")
-        forgot.setCursor(QCursor(Qt.CursorShape.PointingHandCursor))
-        forgot.clicked.connect(self._forgot_pin)
-
-        lay.addWidget(logo)
-        lay.addSpacing(8)
-        lay.addWidget(self._avatar_lbl, 0, Qt.AlignmentFlag.AlignCenter)
-        lay.addWidget(self._welcome_lbl)
-        lay.addWidget(hint)
-        lay.addSpacing(8)
-        lay.addWidget(self._pin_input, 0, Qt.AlignmentFlag.AlignCenter)
-        lay.addWidget(self._err_lbl)
-        lay.addWidget(self._countdown_lbl)
-        lay.addSpacing(8)
-        lay.addWidget(forgot, 0, Qt.AlignmentFlag.AlignCenter)
-
-        self._countdown_timer = QTimer()
-        self._countdown_timer.timeout.connect(self._update_countdown)
-        self._lock_until = None
-
-    def load_user(self):
-        user = self.db.get_user()
-        if user:
-            self._welcome_lbl.setText(f"Welcome back, {user['name']}")
-            if user.get("avatar_path") and __import__("pathlib").Path(user["avatar_path"]).exists():
-                pix = QPixmap(user["avatar_path"]).scaled(72, 72, Qt.AspectRatioMode.KeepAspectRatioByExpanding, Qt.TransformationMode.SmoothTransformation)
-                self._avatar_lbl.setPixmap(make_circular_pixmap(pix, 72))
-            else:
-                initials = "".join(part[0].upper() for part in user["name"].split()[:2])
-                self._avatar_lbl.setText(initials)
-                self._avatar_lbl.setStyleSheet(f"border-radius:36px; background:{C_ACCENT}; color:#fff; font-size:22px; font-weight:bold; border:2px solid {C_BORDER};")
-
-    @pyqtSlot(str)
-    def _check_pin(self, pin: str):
-        if not self._pin_input.isEnabled():
-            return
-        user = self.db.get_user()
-        if not user:
-            return
-        ok, msg = self.db.verify_pin(user["id"], pin)
-        if ok:
-            self._err_lbl.setText("")
-            self._countdown_lbl.setText("")
-            self.db.log_activity("login", f"Login successful for {user['email']}")
-            self.pin_accepted.emit()
-        else:
-            self._pin_input.clear_all()
-            self._pin_input.set_error()
-            self._err_lbl.setText(msg or "Incorrect PIN")
-            if msg and ("Locked" in msg or "Too many" in msg):
-                self._pin_input.setEnabled(False)
-                locked_row = self.db.get_user()
-                lu = locked_row.get("pin_locked_until") if locked_row else None
-                if lu:
-                    try:
-                        self._lock_until = datetime.fromisoformat(lu)
-                        self._countdown_timer.start(1000)
-                    except Exception:
-                        pass
-
-    def _update_countdown(self):
-        if self._lock_until:
-            remaining = (self._lock_until - datetime.now()).total_seconds()
-            if remaining <= 0:
-                self._countdown_lbl.setText("")
-                self._err_lbl.setText("")
-                self._pin_input.setEnabled(True)
-                self._countdown_timer.stop()
-                self._pin_input.clear_all()
-            else:
-                mins = int(remaining) // 60
-                secs = int(remaining) % 60
-                self._countdown_lbl.setText(f"Try again in {mins}:{secs:02d}")
-
-    def _forgot_pin(self):
-        dlg = QDialog(self)
-        dlg.setWindowTitle("Reset PIN")
-        dlg.setFixedSize(400, 360)
-        dlg.setStyleSheet(STYLESHEET)
-        lay = QVBoxLayout(dlg)
-        lay.setSpacing(12)
-        lay.setContentsMargins(24, 24, 24, 24)
-        lay.addWidget(QLabel("Enter your email and password to reset your PIN:"))
-        f_email = QLineEdit()
-        f_email.setPlaceholderText("Email")
-        f_pass = QLineEdit()
-        f_pass.setPlaceholderText("Password")
-        f_pass.setEchoMode(QLineEdit.EchoMode.Password)
-        lbl_err = QLabel("")
-        lbl_err.setStyleSheet(f"color:{C_RED};")
-        lbl_new = QLabel("New PIN:")
-        lbl_new.setVisible(False)
-        new_pin = PinInput()
-        new_pin.setVisible(False)
-        lbl_cnf = QLabel("Confirm new PIN:")
-        lbl_cnf.setVisible(False)
-        cnf_pin = PinInput()
-        cnf_pin.setVisible(False)
-        pin_err = QLabel("")
-        pin_err.setStyleSheet(f"color:{C_RED};")
-        pin_err.setVisible(False)
-
-        def verify():
-            email = f_email.text().strip()
-            pw = f_pass.text()
-            if self.db.verify_password(email, pw):
-                f_email.setEnabled(False)
-                f_pass.setEnabled(False)
-                lbl_new.setVisible(True)
-                new_pin.setVisible(True)
-                lbl_cnf.setVisible(True)
-                cnf_pin.setVisible(True)
-                pin_err.setVisible(True)
-                lbl_err.setText("")
-            else:
-                lbl_err.setText("Email or password incorrect.")
-
-        def set_new_pin():
-            p1 = new_pin.get_pin()
-            p2 = cnf_pin.get_pin()
-            if len(p1) != 6:
-                pin_err.setText("Enter all 6 digits.")
-                return
-            if p1 != p2:
-                pin_err.setText("PINs do not match.")
-                return
-            user = self.db.get_user()
-            if user:
-                self.db.set_pin(user["id"], p1)
-                self.db.log_activity("pin_reset", "PIN was reset via password verification")
-            dlg.accept()
-
-        btn_verify = QPushButton("Verify Identity")
-        btn_verify.setObjectName("btn_primary")
-        btn_verify.clicked.connect(verify)
-        btn_setpin = QPushButton("Set New PIN")
-        btn_setpin.setObjectName("btn_success")
-        btn_setpin.clicked.connect(set_new_pin)
-
-        lay.addWidget(f_email)
-        lay.addWidget(f_pass)
-        lay.addWidget(lbl_err)
-        lay.addWidget(btn_verify)
-        lay.addWidget(lbl_new)
-        lay.addWidget(new_pin)
-        lay.addWidget(lbl_cnf)
-        lay.addWidget(cnf_pin)
-        lay.addWidget(pin_err)
-        lay.addWidget(btn_setpin)
-        dlg.exec()
 
 
 
@@ -5178,542 +5121,6 @@ class ClusterPanel(QWidget):
 
 # ─────────────────────────────────────────────
 #  PANEL 3 — HARDWARE MONITOR
-# ─────────────────────────────────────────────
-class HardwarePanel(QWidget):
-    def __init__(self, db, parent=None):
-        super().__init__(parent)
-        self.db = db
-        lay = QVBoxLayout(self)
-        lay.setContentsMargins(24, 24, 24, 24)
-        lay.setSpacing(16)
-
-        # Live gauges row
-        gauges_row = QHBoxLayout()
-        gauges_row.setSpacing(12)
-        self._cpu_card = self._make_gauge_card("CPU Usage", "%")
-        self._mem_card = self._make_gauge_card("Memory", "GB")
-        self._disk_card = self._make_gauge_card("Disk", "GB")
-        self._net_card = self._make_gauge_card("Network I/O", "KB/s")
-        for c in [self._cpu_card, self._mem_card, self._disk_card, self._net_card]:
-            gauges_row.addWidget(c)
-        lay.addLayout(gauges_row)
-
-        # Per-core CPU breakdown
-        core_card = Card("CPU Cores")
-        self._core_layout = QGridLayout()
-        self._core_layout.setSpacing(4)
-        core_card.body().addLayout(self._core_layout)
-        lay.addWidget(core_card)
-
-        # System Info
-        info_card = Card("System Information")
-        info_body = info_card.body()
-        self._sys_info_lbl = QLabel(self._get_sys_info())
-        self._sys_info_lbl.setStyleSheet(f"color:{C_TEXT}; font-family:Consolas; font-size:12px;")
-        self._sys_info_lbl.setWordWrap(True)
-        info_body.addWidget(self._sys_info_lbl)
-        lay.addWidget(info_card)
-        lay.addStretch()
-        self._init_cores()
-
-    def _make_gauge_card(self, title: str, unit: str) -> Card:
-        card = Card(title)
-        body = card.body()
-        pb = QProgressBar()
-        pb.setRange(0, 100)
-        pb.setValue(0)
-        pb.setFixedHeight(12)
-        val_lbl = QLabel("0 " + unit)
-        val_lbl.setStyleSheet(f"color:{C_TEXT}; font-size:20px; font-weight:bold;")
-        val_lbl.setObjectName("val")
-        pct_lbl = QLabel("0%")
-        pct_lbl.setStyleSheet(f"color:{C_TEXT_DIM}; font-size:12px;")
-        pct_lbl.setObjectName("pct")
-        body.addWidget(val_lbl)
-        body.addWidget(pct_lbl)
-        body.addWidget(pb)
-        card._pb = pb
-        return card
-
-    def _init_cores(self):
-        try:
-            count = psutil.cpu_count(logical=True) or 1
-            self._core_bars = []
-            for i in range(count):
-                pb = QProgressBar()
-                pb.setRange(0, 100)
-                pb.setValue(0)
-                pb.setFixedHeight(8)
-                pb.setTextVisible(False)
-                lbl = QLabel(f"C{i}")
-                lbl.setStyleSheet(f"color:{C_TEXT_DIM}; font-size:10px;")
-                row = i // 4
-                col_base = (i % 4) * 2
-                self._core_layout.addWidget(lbl, row, col_base)
-                self._core_layout.addWidget(pb, row, col_base + 1)
-                self._core_bars.append(pb)
-        except Exception:
-            self._core_bars = []
-
-    def _get_sys_info(self) -> str:
-        try:
-            mem = psutil.virtual_memory()
-            lines = [
-                f"OS:        {platform.system()} {platform.version()[:40]}",
-                f"CPU:       {platform.processor()[:50]}",
-                f"Cores:     {psutil.cpu_count(logical=False)} physical / {psutil.cpu_count(logical=True)} logical",
-                f"RAM:       {mem.total / (1024**3):.1f} GB",
-                f"Python:    {sys.version.split()[0]}",
-                f"Hostname:  {socket.gethostname()}",
-            ]
-            try:
-                ip = socket.gethostbyname(socket.gethostname())
-                lines.append(f"IP:        {ip}")
-            except Exception:
-                pass
-            return "\n".join(lines)
-        except Exception:
-            return "System info unavailable"
-
-    def update_snapshot(self, data: dict):
-        cpu = data.get("cpu_percent", 0)
-        mem_used = data.get("memory_used_mb", 0) / 1024
-        mem_total = data.get("memory_total_mb", 0) / 1024
-        mem_pct = data.get("memory_percent", 0)
-        disk_used = data.get("disk_used_gb", 0)
-        disk_total = data.get("disk_total_gb", 0)
-        disk_pct = data.get("disk_percent", 0)
-        net_sent = data.get("network_sent_mb", 0) * 1024
-        net_recv = data.get("network_recv_mb", 0) * 1024
-
-        def upd_card(card, pct, val_text, pct_text):
-            card._pb.setValue(int(pct))
-            for child in card.findChildren(QLabel):
-                if child.objectName() == "val":
-                    child.setText(val_text)
-                elif child.objectName() == "pct":
-                    child.setText(pct_text)
-            color = C_RED if pct > 90 else C_YELLOW if pct > 70 else C_ACCENT
-            card._pb.setStyleSheet(f"QProgressBar::chunk {{ background:{color}; border-radius:4px; }}")
-
-        upd_card(self._cpu_card, cpu, f"{cpu:.1f}%", f"CPU Usage")
-        upd_card(self._mem_card, mem_pct, f"{mem_used:.1f}/{mem_total:.1f} GB", f"{mem_pct:.1f}%")
-        upd_card(self._disk_card, disk_pct, f"{disk_used:.1f}/{disk_total:.1f} GB", f"{disk_pct:.1f}%")
-        net_total = net_sent + net_recv
-        upd_card(self._net_card, min(100, net_total/100), f"Sent: {net_sent:.1f} KB/s", f"Recv: {net_recv:.1f} KB/s")
-
-        # Update per-core
-        try:
-            per_core = psutil.cpu_percent(percpu=True)
-            for i, (pb, pct) in enumerate(zip(self._core_bars, per_core)):
-                pb.setValue(int(pct))
-        except Exception:
-            pass
-
-
-
-# ─────────────────────────────────────────────
-#  PANEL 4 — METRICS & SCALING
-# ─────────────────────────────────────────────
-class MetricsPanel(QWidget):
-    def __init__(self, db, ops, parent=None):
-        super().__init__(parent)
-        self.db = db
-        self.ops = ops
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll.setFrameShape(QFrame.Shape.NoFrame)
-        content = QWidget()
-        lay = QVBoxLayout(content)
-        lay.setContentsMargins(24, 24, 24, 24)
-        lay.setSpacing(16)
-
-        # Current Traffic
-        traffic_card = Card("Current Traffic")
-        tb = traffic_card.body()
-        traffic_row = QHBoxLayout()
-        self._rps_lbl = self._make_metric("Current RPS", "0.00")
-        self._req_lbl = self._make_metric("Total Requests", "0")
-        traffic_row.addWidget(self._rps_lbl)
-        traffic_row.addWidget(self._req_lbl)
-        tb.addLayout(traffic_row)
-        lay.addWidget(traffic_card)
-
-        # Scaling Status
-        scale_card = Card("Scaling Status")
-        sb = scale_card.body()
-        scale_grid = QGridLayout()
-        self._pod_count_lbl = QLabel("Pods: 0")
-        self._pod_count_lbl.setStyleSheet(f"color:{C_TEXT}; font-size:16px; font-weight:bold;")
-        self._keda_status_lbl = QLabel("KEDA: Unknown")
-        self._keda_status_lbl.setStyleSheet(f"color:{C_TEXT_DIM};")
-        self._min_max_lbl = QLabel("Min/Max: 2/10")
-        self._min_max_lbl.setStyleSheet(f"color:{C_TEXT_DIM};")
-        scale_grid.addWidget(self._pod_count_lbl, 0, 0)
-        scale_grid.addWidget(self._keda_status_lbl, 0, 1)
-        scale_grid.addWidget(self._min_max_lbl, 1, 0)
-        sb.addLayout(scale_grid)
-
-        # Manual scale
-        manual_row = QHBoxLayout()
-        manual_lbl = QLabel("Manual scale to:")
-        self._scale_spin = QSpinBox()
-        self._scale_spin.setRange(0, 20)
-        self._scale_spin.setValue(2)
-        scale_now_btn = QPushButton("Scale Now")
-        scale_now_btn.setObjectName("btn_warning")
-        scale_now_btn.clicked.connect(self._manual_scale)
-        self._scale_result_lbl = QLabel("")
-        self._scale_result_lbl.setStyleSheet(f"color:{C_TEXT_DIM}; font-size:12px;")
-        manual_row.addWidget(manual_lbl)
-        manual_row.addWidget(self._scale_spin)
-        manual_row.addWidget(scale_now_btn)
-        manual_row.addWidget(self._scale_result_lbl)
-        manual_row.addStretch()
-        sb.addLayout(manual_row)
-        lay.addWidget(scale_card)
-
-        # ARIMA Prediction
-        pred_card = Card("ARIMA Prediction (AI Model)")
-        pb = pred_card.body()
-        self._pred_rps_lbl = QLabel("Predicted RPS in 5 min: N/A")
-        self._pred_rps_lbl.setStyleSheet(f"color:{C_TEXT}; font-size:15px; font-weight:bold;")
-        self._pred_pods_lbl = QLabel("Recommended pods: N/A")
-        self._pred_pods_lbl.setStyleSheet(f"color:{C_TEXT_DIM};")
-        pb.addWidget(self._pred_rps_lbl)
-        pb.addWidget(self._pred_pods_lbl)
-        lay.addWidget(pred_card)
-
-        # GreenOps Policy
-        green_card = Card("GreenOps Policy")
-        gb = green_card.body()
-        green_desc = QLabel("Automatically scale down to 0 pods during off-hours to save resources.")
-        green_desc.setStyleSheet(f"color:{C_TEXT_DIM};")
-        green_desc.setWordWrap(True)
-        self._greenops_toggle = QCheckBox("Enable GreenOps Policy")
-        time_row = QHBoxLayout()
-        self._green_start = QTimeEdit()
-        self._green_start.setDisplayFormat("HH:mm")
-        self._green_start.setTime(__import__("PyQt6.QtCore", fromlist=["QTime"]).QTime(23, 0))
-        dash = QLabel("—")
-        self._green_end = QTimeEdit()
-        self._green_end.setDisplayFormat("HH:mm")
-        self._green_end.setTime(__import__("PyQt6.QtCore", fromlist=["QTime"]).QTime(6, 0))
-        time_row.addWidget(QLabel("Scale down from:"))
-        time_row.addWidget(self._green_start)
-        time_row.addWidget(dash)
-        time_row.addWidget(self._green_end)
-        time_row.addStretch()
-        apply_green_btn = QPushButton("Apply GreenOps Policy")
-        apply_green_btn.setObjectName("btn_success")
-        apply_green_btn.clicked.connect(self._apply_greenops)
-        self._green_result_lbl = QLabel("")
-        self._green_result_lbl.setStyleSheet(f"color:{C_TEXT_DIM}; font-size:12px;")
-        gb.addWidget(green_desc)
-        gb.addWidget(self._greenops_toggle)
-        gb.addLayout(time_row)
-        gb.addWidget(apply_green_btn)
-        gb.addWidget(self._green_result_lbl)
-        lay.addWidget(green_card)
-
-        lay.addStretch()
-        scroll.setWidget(content)
-        outer = QVBoxLayout(self)
-        outer.setContentsMargins(0, 0, 0, 0)
-        outer.addWidget(scroll)
-
-    def _make_metric(self, label: str, value: str) -> QFrame:
-        f = QFrame()
-        f.setStyleSheet(f"background:{C_SURFACE}; border:1px solid {C_BORDER}; border-radius:8px;")
-        fl = QVBoxLayout(f)
-        fl.setContentsMargins(16, 12, 16, 12)
-        lbl = QLabel(label)
-        lbl.setStyleSheet(f"color:{C_TEXT_DIM}; font-size:11px;")
-        val = QLabel(value)
-        val.setStyleSheet(f"color:{C_TEXT}; font-size:24px; font-weight:bold;")
-        val.setObjectName("metric_val")
-        fl.addWidget(lbl)
-        fl.addWidget(val)
-        return f
-
-    def update_metrics(self, data: dict):
-        rps = data.get("rps", 0.0)
-        pods = data.get("pod_count", 0)
-        keda = data.get("keda_active", False)
-        pred = data.get("predicted_rps")
-
-        for frame, val in [(self._rps_lbl, f"{rps:.2f}"), (self._req_lbl, "N/A")]:
-            for child in frame.findChildren(QLabel):
-                if child.objectName() == "metric_val":
-                    child.setText(val)
-
-        self._pod_count_lbl.setText(f"Pods: {pods}")
-        self._keda_status_lbl.setText(f"KEDA: {'Active' if keda else 'Inactive'}")
-        self._keda_status_lbl.setStyleSheet(f"color:{C_GREEN if keda else C_RED};")
-
-        if pred is not None:
-            self._pred_rps_lbl.setText(f"Predicted RPS in 5 min: {pred:.2f}")
-            recommended = max(2, int(pred / 5) + 1)
-            self._pred_pods_lbl.setText(f"Recommended pods: {recommended}")
-        else:
-            self._pred_rps_lbl.setText("Predicted RPS in 5 min: N/A (AI model not running)")
-
-    def _manual_scale(self):
-        replicas = self._scale_spin.value()
-        self._scale_result_lbl.setText("Scaling...")
-        def do():
-            ok, out = self.ops.scale_deployment(replicas)
-            self._scale_result_lbl.setText(f"{'OK' if ok else 'Error'}: {out[:80]}")
-            self.db.log_activity("scale_event", f"Manual scale to {replicas} replicas", {"ok": ok, "output": out[:200]})
-        import threading
-        threading.Thread(target=do, daemon=True).start()
-
-    def _apply_greenops(self):
-        enabled = self._greenops_toggle.isChecked()
-        start_time = self._green_start.time().toString("HH:mm")
-        end_time = self._green_end.time().toString("HH:mm")
-        if enabled:
-            self._green_result_lbl.setText(f"GreenOps: scale to 0 from {start_time} to {end_time} (pending scheduler)")
-        else:
-            self._green_result_lbl.setText("GreenOps disabled")
-        self.db.set_setting("greenops_enabled", str(enabled))
-        self.db.set_setting("greenops_start", start_time)
-        self.db.set_setting("greenops_end", end_time)
-        self.db.log_activity("greenops", f"GreenOps policy {'enabled' if enabled else 'disabled'}: {start_time}-{end_time}")
-
-
-# ─────────────────────────────────────────────
-#  PANEL 5 — TUNNEL MANAGER
-# ─────────────────────────────────────────────
-class TunnelPanel(QWidget):
-    def __init__(self, db, ops, parent=None):
-        super().__init__(parent)
-        self.db = db
-        self.ops = ops
-        lay = QVBoxLayout(self)
-        lay.setContentsMargins(24, 24, 24, 24)
-        lay.setSpacing(16)
-
-        # Tunnel type selector
-        type_card = Card("Tunnel Türü")
-        type_body = type_card.body()
-        self._rb_ngrok = QRadioButton("ngrok (Ücretsiz tier desteklenir)")
-        self._rb_none = QRadioButton("Kapalı")
-        self._rb_none.setChecked(True)
-        bg = QButtonGroup(self)
-        bg.addButton(self._rb_ngrok)
-        bg.addButton(self._rb_none)
-        self._rb_ngrok.toggled.connect(self._on_type_changed)
-        type_body.addWidget(self._rb_ngrok)
-        type_body.addWidget(self._rb_none)
-        lay.addWidget(type_card)
-
-        # ── ngrok Kurulum Rehberi ──────────────────────────────────────────────
-        self._ngrok_guide_card = Card("📖 ngrok Kurulum Rehberi")
-        ng_guide_body = self._ngrok_guide_card.body()
-        ngrok_steps = QLabel(
-            "1.  ngrok.com/download adresine git, Windows sürümünü indir\n"
-            "2.  İndirilen ZIP'i açıp ngrok.exe dosyasını C:\\ngrok\\ klasörüne koy\n"
-            "3.  PATH'e ekle: Başlat → 'Ortam değişkenleri' → Sistem Değişkenleri → Path → C:\\ngrok ekle\n"
-            "4.  dashboard.ngrok.com/get-started/your-authtoken adresinden token al\n"
-            "5.  Token'ı aşağıdaki alana gir, 'ngrok Başlat' butonuna bas\n"
-            "6.  Oluşan URL'yi kopyala — uygulamanı internete açmış olursun\n\n"
-            "ℹ  Ücretsiz hesap: Tek aktif tunnel, URL her başlatmada değişir\n"
-            "   Sabit URL için ngrok Pro gerekli (ayda ~$8)"
-        )
-        ngrok_steps.setStyleSheet(f"color:{C_TEXT_DIM}; font-size:12px; padding:4px;")
-        ngrok_steps.setWordWrap(True)
-        ng_guide_body.addWidget(ngrok_steps)
-        self._ngrok_guide_card.setVisible(False)
-        lay.addWidget(self._ngrok_guide_card)
-
-        # ngrok section
-        self._ngrok_card = Card("ngrok Yapılandırma")
-        ng_body = self._ngrok_card.body()
-        self._ngrok_token = QLineEdit()
-        self._ngrok_token.setPlaceholderText("ngrok auth token (optional — free tier)")
-        self._ngrok_token.setEchoMode(QLineEdit.EchoMode.Password)
-        saved_token = self.db.get_setting("ngrok_token", "")
-        if saved_token:
-            self._ngrok_token.setText(saved_token)
-        self._ngrok_url_lbl = QLabel("Tunnel URL: Çalışmıyor")
-        self._ngrok_url_lbl.setStyleSheet(f"color:{C_TEXT_DIM}; font-family:Consolas;")
-        ngrok_btn_row = QHBoxLayout()
-        btn_start_ngrok = QPushButton("ngrok Başlat")
-        btn_start_ngrok.setObjectName("btn_primary")
-        btn_start_ngrok.clicked.connect(self._start_ngrok)
-        btn_stop_ngrok = QPushButton("Durdur")
-        btn_stop_ngrok.setObjectName("btn_danger")
-        btn_stop_ngrok.clicked.connect(self._stop_tunnel)
-        self._btn_copy_ngrok = QPushButton("URL Kopyala")
-        self._btn_copy_ngrok.clicked.connect(self._copy_url)
-        self._btn_open_ngrok = QPushButton("Aç ↗")
-        self._btn_open_ngrok.clicked.connect(self._open_tunnel)
-        ngrok_btn_row.addWidget(btn_start_ngrok)
-        ngrok_btn_row.addWidget(btn_stop_ngrok)
-        ngrok_btn_row.addWidget(self._btn_copy_ngrok)
-        ngrok_btn_row.addWidget(self._btn_open_ngrok)
-        ng_body.addWidget(QLabel("Auth Token:"))
-        ng_body.addWidget(self._ngrok_token)
-        ng_body.addWidget(self._ngrok_url_lbl)
-        ng_body.addLayout(ngrok_btn_row)
-        self._ngrok_card.setVisible(False)
-        lay.addWidget(self._ngrok_card)
-
-        # Tunnel log
-        log_card = Card("Tunnel Events")
-        log_body = log_card.body()
-        self._tunnel_log = LogWidget()
-        self._tunnel_log.setMaximumHeight(150)
-        log_body.addWidget(self._tunnel_log)
-        lay.addWidget(log_card)
-        lay.addStretch()
-        self._current_url = None
-
-    def _on_type_changed(self):
-        is_ngrok = self._rb_ngrok.isChecked()
-        self._ngrok_guide_card.setVisible(is_ngrok)
-        self._ngrok_card.setVisible(is_ngrok)
-
-    def _start_ngrok(self):
-        token = self._ngrok_token.text().strip() or None
-        if token:
-            self.db.set_setting("ngrok_token", token)
-        self._tunnel_log.append_line("Starting ngrok...", "info")
-        def do():
-            ok, url_or_err = self.ops.start_ngrok(token)
-            if ok:
-                self._current_url = url_or_err
-                self._ngrok_url_lbl.setText(f"Tunnel URL: {url_or_err}")
-                self._tunnel_log.append_line(f"Tunnel started: {url_or_err}", "ok")
-                self.db.log_activity("tunnel_start", f"ngrok tunnel started", {"url": url_or_err})
-            else:
-                self._tunnel_log.append_line(f"Failed: {url_or_err}", "error")
-        import threading
-        threading.Thread(target=do, daemon=True).start()
-
-    def _stop_tunnel(self):
-        self.ops.stop_tunnel()
-        self._current_url = None
-        self._ngrok_url_lbl.setText("Tunnel URL: Çalışmıyor")
-        self._tunnel_log.append_line("Tunnel durduruldu", "warn")
-        self.db.log_activity("tunnel_stop", "Tunnel stopped")
-
-    def _copy_url(self):
-        if self._current_url:
-            QApplication.clipboard().setText(self._current_url)
-            self._tunnel_log.append_line(f"Copied: {self._current_url}", "info")
-
-    def _open_tunnel(self):
-        url = self._current_url or self.ops.get_tunnel_url()
-        if url:
-            webbrowser.open(url)
-
-
-
-# ─────────────────────────────────────────────
-#  PANEL 6 — ACTIVITY LOG
-# ─────────────────────────────────────────────
-class ActivityLogPanel(QWidget):
-    def __init__(self, db, parent=None):
-        super().__init__(parent)
-        self.db = db
-        lay = QVBoxLayout(self)
-        lay.setContentsMargins(24, 24, 24, 24)
-        lay.setSpacing(12)
-
-        # Filter toolbar
-        filter_row = QHBoxLayout()
-        self._type_combo = QComboBox()
-        self._type_combo.addItems(["All", "cluster_start", "cluster_stop", "login", "error",
-                                    "scale_event", "tunnel_start", "tunnel_stop", "pin_attempt",
-                                    "account_created", "pin_reset"])
-        self._search_field = QLineEdit()
-        self._search_field.setPlaceholderText("Search...")
-        btn_refresh = QPushButton("Refresh")
-        btn_refresh.clicked.connect(self.refresh_log)
-        btn_export = QPushButton("Export CSV")
-        btn_export.clicked.connect(self._export_csv)
-        btn_clear = QPushButton("Clear Log")
-        btn_clear.setObjectName("btn_danger")
-        btn_clear.clicked.connect(self._clear_log)
-        filter_row.addWidget(QLabel("Type:"))
-        filter_row.addWidget(self._type_combo)
-        filter_row.addSpacing(8)
-        filter_row.addWidget(QLabel("Search:"))
-        filter_row.addWidget(self._search_field)
-        filter_row.addWidget(btn_refresh)
-        filter_row.addWidget(btn_export)
-        filter_row.addWidget(btn_clear)
-        lay.addLayout(filter_row)
-
-        # Table
-        self._table = QTableWidget(0, 4)
-        self._table.setHorizontalHeaderLabels(["Timestamp", "Event Type", "Description", "Details"])
-        self._table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeMode.Stretch)
-        self._table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
-        self._table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
-        self._table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
-        self._table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
-        self._table.verticalHeader().setVisible(False)
-        lay.addWidget(self._table)
-
-        # Auto-refresh
-        self._auto_timer = QTimer()
-        self._auto_timer.timeout.connect(self.refresh_log)
-        self._auto_timer.start(30000)
-
-        self.refresh_log()
-
-    def refresh_log(self):
-        event_type = self._type_combo.currentText()
-        search = self._search_field.text().strip() or None
-        logs = self.db.get_activity_log(limit=200, event_type=event_type if event_type != "All" else None, search=search)
-        self._table.setRowCount(0)
-        error_types = {"error", "cluster_stop"}
-        warn_types = {"pin_attempt", "tunnel_stop"}
-        for entry in logs:
-            row = self._table.rowCount()
-            self._table.insertRow(row)
-            ts = entry.get("timestamp", "")[:19].replace("T", " ")
-            evt = entry.get("event_type", "")
-            desc = entry.get("description", "")
-            det = entry.get("details", "") or ""
-            for col, val in enumerate([ts, evt, desc, det]):
-                item = QTableWidgetItem(str(val))
-                if evt in error_types:
-                    item.setForeground(QColor(C_RED))
-                elif evt in warn_types:
-                    item.setForeground(QColor(C_YELLOW))
-                self._table.setItem(row, col, item)
-
-    def _export_csv(self):
-        path, _ = QFileDialog.getSaveFileName(self, "Export Activity Log", "activity_log.csv", "CSV Files (*.csv)")
-        if not path:
-            return
-        logs = self.db.get_activity_log(limit=10000)
-        try:
-            with open(path, "w", newline="", encoding="utf-8") as f:
-                writer = csv.DictWriter(f, fieldnames=["id", "timestamp", "event_type", "description", "details"])
-                writer.writeheader()
-                writer.writerows(logs)
-            QMessageBox.information(self, "Export", f"Exported {len(logs)} entries to {path}")
-        except Exception as e:
-            QMessageBox.critical(self, "Export Error", str(e))
-
-    def _clear_log(self):
-        reply = QMessageBox.question(self, "Clear Log",
-                                     "Are you sure you want to clear all activity log entries? This cannot be undone.",
-                                     QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
-        if reply == QMessageBox.StandardButton.Yes:
-            with self.db._lock:
-                self.db.conn.execute("DELETE FROM activity_log")
-                self.db.conn.commit()
-            self.refresh_log()
-
-
-# ─────────────────────────────────────────────
-#  SİSTEM GEREKSİNİM KONTROL WORKER
 # ─────────────────────────────────────────────
 class SystemCheckWorker(QThread):
     """Arka planda sistem gereksinimlerini kontrol eder."""
@@ -8232,7 +7639,7 @@ class MainWindow(QMainWindow):
             self.db.log_activity("logout", "Kullanıcı oturumu kapattı")
             self.hide()
             if self.parent():
-                self.parent().show_pin_screen()
+                self.parent()._show_main_app_and_check() if hasattr(self.parent(), '_show_main_app_and_check') else None
 
     def load_user(self):
         user = self.db.get_user()
@@ -8560,11 +7967,6 @@ class AppController(QObject):
         self._main_placeholder = QWidget()
         self._stack.addWidget(self._main_placeholder)  # index 2
 
-        # Screen 3: PIN screen (placeholder)
-        self._pin_screen = None
-        self._pin_placeholder = QWidget()
-        self._stack.addWidget(self._pin_placeholder)  # index 3
-
         self._stack.setCurrentIndex(0)
 
         # Tray
@@ -8586,21 +7988,18 @@ class AppController(QObject):
         self._win.activateWindow()
 
     def _init_app(self):
-        self._splash.set_status("Checking database...")
+        self._splash.set_status("Sistem kontrol ediliyor...")
         try:
             self.instance = self.ops.ensure_instance()
-        except Exception as e:
+        except Exception:
             self.instance = None
 
-        self._splash.set_status("Checking user account...")
-        user = self.db.get_user()
-
-        if user is None:
-            self._splash.set_status("İlk kurulum başlatılıyor...")
-            QTimer.singleShot(500, self._show_wizard)
-        else:
-            self._splash.set_status("Uygulama yükleniyor...")
+        if SETUP_COMPLETE_PATH.exists():
+            self._splash.set_status("Uygulama yukleniyor...")
             QTimer.singleShot(500, self._show_main_app_and_check)
+        else:
+            self._splash.set_status("Ilk kurulum baslatiliyor...")
+            QTimer.singleShot(500, self._show_wizard)
 
     def _show_wizard(self):
         if self._wizard is None:
@@ -8618,21 +8017,6 @@ class AppController(QObject):
     def _show_main_app_and_check(self):
         self._show_main_app()
         QTimer.singleShot(800, self._post_login_check)
-
-    def _show_pin_screen(self):
-        if self._pin_screen is None:
-            self._pin_screen = PinScreen(self.db)
-            self._pin_screen.pin_accepted.connect(self._on_pin_accepted)
-            self._stack.removeWidget(self._pin_placeholder)
-            self._pin_placeholder.deleteLater()
-            self._stack.insertWidget(3, self._pin_screen)
-        self._pin_screen.load_user()
-        self._pin_screen._pin_input.clear_all() if hasattr(self._pin_screen._pin_input, "clear_all") else None
-        self._stack.setCurrentIndex(3)
-
-    def _on_pin_accepted(self):
-        # PIN ekranı artık kullanılmıyor, yine de bağlantı sağlamlığı için burada
-        self._show_main_app_and_check()
 
     def _post_login_check(self):
         """PIN girişi sonrası sistem gereksinimlerini kontrol eder."""
@@ -8662,9 +8046,6 @@ class AppController(QObject):
         self._main_app.load_user()
         self._stack.setCurrentWidget(self._main_app)
 
-    def show_pin_screen(self):
-        self._show_pin_screen()
-
     def _show_main(self):
         self._win.show()
         self._win.raise_()
@@ -8672,8 +8053,8 @@ class AppController(QObject):
 
     def _quit_app(self):
         reply = QMessageBox.question(
-            self._win, "Quit AutoScaleOps",
-            "Stop port forwards and quit AutoScaleOps?",
+            self._win, "AutoScaleOps'tan Cik",
+            "Port yonlendirmeleri durdurulsun ve uygulama kapatilsin mi?",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
         )
         if reply == QMessageBox.StandardButton.Yes:
