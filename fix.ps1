@@ -13,6 +13,18 @@ $SCRIPT_DIR = Split-Path -Parent $MyInvocation.MyCommand.Path
 $TOTAL_STEPS = 9
 
 # ─────────────────────────────────────────────────────────────────────────────
+# WINGET VARLIK KONTROLU  (winget yoksa sessizce atla)
+# ─────────────────────────────────────────────────────────────────────────────
+function EnsureWinget {
+    if (IsInstalled "winget") { return $true }
+    Write-Host ""
+    Write-Host "  [!] winget bulunamadi." -ForegroundColor Yellow
+    Write-Host "      Windows 10 1809+ veya Windows 11 gerektirir." -ForegroundColor Gray
+    Write-Host "      winget.microsoft.com adresinden yukleyebilirsiniz." -ForegroundColor Gray
+    return $false
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
 # YARDIMCI FONKSIYONLAR
 # ─────────────────────────────────────────────────────────────────────────────
 function Step($n, $msg) {
@@ -54,11 +66,46 @@ function RefreshPath {
 Step 1 "Python kontrol ediliyor..."
 
 if (-not (IsInstalled "python")) {
-    ERR "Python bulunamadi! python.org/downloads adresinden kurun."
-    ERR "Kurulumda 'Add Python to PATH' secenegini isaretleyin."
-    Read-Host "`n  Kurup tekrar calistirin — Enter ile cik"
-    exit 1
+    WARN "Python bulunamadi — winget ile otomatik yukleniyor..."
+
+    if (-not (EnsureWinget)) {
+        ERR "Python bulunamadi ve winget de yok!"
+        ERR "Lutfen python.org/downloads adresinden Python 3.11+ kurun."
+        ERR "Kurulumda 'Add Python to PATH' secenegini mutlaka isaretleyin!"
+        Read-Host "`n  Kurup tekrar calistirin — Enter ile cik"
+        exit 1
+    }
+
+    INFO "Python 3.11 yukleniyor (1-3 dk)..."
+    winget install Python.Python.3.11 `
+        --silent `
+        --accept-package-agreements `
+        --accept-source-agreements `
+        --override "/quiet InstallAllUsers=0 PrependPath=1 Include_pip=1" 2>&1 |
+        Where-Object { $_ -match "." } | ForEach-Object { INFO $_ }
+
+    RefreshPath
+
+    # winget PATH'i aninda guncellemiyor olabilir — py launcher'i dene
+    if (-not (IsInstalled "python")) {
+        if (IsInstalled "py") {
+            # py launcher uzerinden calis
+            Set-Alias python (py -3 -c "import sys; print(sys.executable)" 2>&1)
+        }
+        RefreshPath
+    }
+
+    if (-not (IsInstalled "python")) {
+        ERR "Python yuklenemedi veya PATH'e eklenemedi."
+        ERR "Lutfen python.org/downloads adresinden elle kurun."
+        ERR "'Add Python to PATH' secenegini isaretleyin, sonra tekrar calistirin."
+        Read-Host "`n  Enter ile cik"
+        exit 1
+    }
+
+    OK "Python otomatik kuruldu."
 }
+
 $pyver = python --version 2>&1
 OK "Python mevcut: $pyver"
 
