@@ -1188,7 +1188,7 @@ class SystemOps:
     def check_python(self) -> Dict:
         ok, out = run_ps("python --version 2>&1")
         ver = out.strip() if ok else None
-        return {"ok": ok, "version": ver, "name": "Python 3.11+"}
+        return {"ok": ok, "version": ver, "name": "Python Paketleri"}
 
     def all_prereq_checks(self) -> List[Dict]:
         return [
