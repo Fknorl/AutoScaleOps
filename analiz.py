@@ -55,6 +55,15 @@ def load_csv(path: str) -> list[dict]:
         reader = csv.DictReader(f)
         for row in reader:
             rows.append(row)
+    # Timestamp sıralı olmayabilir; elapsed_s'e göre sırala (yoksa timestamp'e göre)
+    def _sort_key(r):
+        es = r.get("elapsed_s", "")
+        try:
+            return (0, float(es))
+        except (ValueError, TypeError):
+            ts = r.get("timestamp", "")
+            return (1, ts)
+    rows.sort(key=_sort_key)
     return rows
 
 
@@ -68,6 +77,14 @@ def safe_float(val, default=None):
 
 def parse_rows(rows: list[dict]) -> dict:
     """CSV satırlarını temiz dizilere çevir."""
+    # İkinci güvence: load_csv'nin sort'una ek olarak elapsed_s'e göre sırala
+    def _sk(r):
+        try:
+            return float(r.get("elapsed_s") or 0)
+        except (ValueError, TypeError):
+            return 0.0
+    rows = sorted(rows, key=_sk)
+
     elapsed       = []
     actual        = []
     predicted     = []
@@ -1233,10 +1250,13 @@ def _build_comparison_plots(data_a: dict, data_b: dict, out_dir: Path):
         print("  [Grafik] karsilastirma_latency_boxplot.png kaydedildi")
 
     # 2. Pod sayısı overlay (iki mod aynı grafikte)
-    pods_a = [v if v is not None else float("nan") for v in data_a["pods"]]
-    pods_b = [v if v is not None else float("nan") for v in data_b["pods"]]
-    hr_a   = [e / 3600 for e in data_a["elapsed"]]
-    hr_b   = [e / 3600 for e in data_b["elapsed"]]
+    # elapsed zaten load_csv'de sıralandı; tuple zip ile tutarlılığı garantile
+    paired_a = sorted(zip(data_a["elapsed"], data_a["pods"]))
+    paired_b = sorted(zip(data_b["elapsed"], data_b["pods"]))
+    hr_a   = [e / 3600 for e, _ in paired_a]
+    pods_a = [v if v is not None else float("nan") for _, v in paired_a]
+    hr_b   = [e / 3600 for e, _ in paired_b]
+    pods_b = [v if v is not None else float("nan") for _, v in paired_b]
 
     if pods_a and pods_b:
         fig, ax = plt.subplots(figsize=(14, 5), dpi=dpi)
@@ -1256,15 +1276,19 @@ def _build_comparison_plots(data_a: dict, data_b: dict, out_dir: Path):
         print("  [Grafik] karsilastirma_pod_overlay.png kaydedildi")
 
     # 3. Latency p95 zaman serisi overlay
-    p95_ts_a = [v if v is not None else float("nan") for v in data_a["lat_p95"]]
-    p95_ts_b = [v if v is not None else float("nan") for v in data_b["lat_p95"]]
+    paired_p95_a = sorted(zip(data_a["elapsed"], data_a["lat_p95"]))
+    paired_p95_b = sorted(zip(data_b["elapsed"], data_b["lat_p95"]))
+    hr_p95_a  = [e / 3600 for e, _ in paired_p95_a]
+    p95_ts_a  = [v if v is not None else float("nan") for _, v in paired_p95_a]
+    hr_p95_b  = [e / 3600 for e, _ in paired_p95_b]
+    p95_ts_b  = [v if v is not None else float("nan") for _, v in paired_p95_b]
 
     if any(not math.isnan(v) for v in p95_ts_a if isinstance(v, float)) and \
        any(not math.isnan(v) for v in p95_ts_b if isinstance(v, float)):
         fig, ax = plt.subplots(figsize=(14, 5), dpi=dpi)
-        ax.plot(hr_a, p95_ts_a, color="#FF7043", linewidth=1.0,
+        ax.plot(hr_p95_a, p95_ts_a, color="#FF7043", linewidth=1.0,
                 label="Mod A p95 (Reaktif)", alpha=0.8)
-        ax.plot(hr_b, p95_ts_b, color="#42A5F5", linewidth=1.0,
+        ax.plot(hr_p95_b, p95_ts_b, color="#42A5F5", linewidth=1.0,
                 label="Mod B p95 (ARIMA)", alpha=0.8, linestyle="--")
         ax.axhline(200, color="gray", linewidth=0.8, linestyle=":",
                    label="200ms hedef")

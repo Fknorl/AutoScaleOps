@@ -1,0 +1,28 @@
+# AutoScaleOps Desktop Application Requirements
+# Install with: pip install -r requirements_desktop.txt
+# Python 3.11+ required
+
+# ── UI Framework ─────────────────────────────
+PyQt6>=6.6.0
+PyQt6-Qt6>=6.6.0
+PyQt6-sip>=13.6.0
+
+# ── System Monitoring ─────────────────────────
+psutil>=5.9.6
+
+# ── Charts / Graphs ───────────────────────────
+matplotlib>=3.8.0
+
+# ── HTTP Client ───────────────────────────────
+requests>=2.31.0
+urllib3>=2.0.0
+
+# ── Cryptography ─────────────────────────────
+cryptography>=41.0.7
+
+# ── Packaging (for building .exe) ─────────────
+# pyinstaller>=6.3.0
+# pyinstaller-hooks-contrib>=2024.1
+
+# ── Dev / optional ───────────────────────────
+# pyqt6-tools>=6.4.0  # Qt Designer tools (optional)

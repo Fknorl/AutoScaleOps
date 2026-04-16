@@ -30,8 +30,8 @@ app:
 # ─── AI Predictor ─────────────────────────────────────────────────────────────
 aiModel:
   name: autoscaleops-ai
-  image: autoscaleops-ai:latest
-  imagePullPolicy: Never
+  image: ghcr.io/fknorl/autoscaleops-predictor:latest
+  imagePullPolicy: Always
   replicas: 1
 
   resources:

@@ -1,175 +1,214 @@
-# 🚀 AutoScaleOps
+# AutoScaleOps
 
-> **Cloud-free, self-hosted auto-scaling platform for your local machine.**  
-> Run Kubernetes on your own hardware — zero cloud costs, full control.
+**ARIMA-based Proactive Kubernetes Autoscaling Framework**
 
----
-
-## 🎯 What Is AutoScaleOps?
-
-AutoScaleOps is an **AI-powered predictive auto-scaling system** that lets you:
-
-- ✅ Run a production-grade Kubernetes cluster **on your own computer**
-- ✅ Auto-scale your web app **before** traffic spikes hit (not after)
-- ✅ Monitor everything via a **professional dashboard**
-- ✅ Pay **zero cloud fees** — only your electricity bill
-
-**Think of it as your own personal AWS, running on your laptop.**
+AutoScaleOps, Kubernetes üzerinde çalışan uygulamalar için trafik artışını önceden tahmin ederek pod'ları **önceden** ölçeklendiren bir framework'tür. Geleneksel reaktif ölçeklemenin (CPU/bellek eşiği) aksine, ARIMA zaman serisi modeliyle %95 güven aralığı kullanarak proaktif karar verir.
 
 ---
 
-## 🏗️ Architecture
+## Nasıl Çalışır?
 
 ```
-┌──────────────────────────────────────────────────────────────┐
-│                     Your Computer                            │
-│                                                              │
-│  ┌─────────────┐    ┌──────────────┐    ┌───────────────┐   │
-│  │  Flask App  │    │ AI Predictor │    │   Dashboard   │   │
-│  │  (port 8080)│    │ (ARIMA Model)│    │  (port 8501)  │   │
-│  └──────┬──────┘    └──────┬───────┘    └───────────────┘   │
-│         │                  │                                  │
-│  ┌──────▼──────────────────▼───────────────────────────┐     │
-│  │              Kubernetes (Minikube)                   │     │
-│  │   ┌─────────┐  ┌────────────┐  ┌────────────────┐  │     │
-│  │   │  KEDA   │  │ Prometheus │  │  Pushgateway   │  │     │
-│  │   └─────────┘  └────────────┘  └────────────────┘  │     │
-│  └─────────────────────────────────────────────────────┘     │
-│                                                              │
-│  ┌─────────────────────────────────────────────────────┐     │
-│  │   Tunnel (ngrok/Cloudflare) → Internet Access       │     │
-│  └─────────────────────────────────────────────────────┘     │
-└──────────────────────────────────────────────────────────────┘
+Prometheus                ARIMA Predictor           KEDA
+(gerçek trafik)  ──────►  (tahmin üret)   ──────►  (pod sayısını ayarla)
+http_requests_total       CI upper bound            predicted_rps_30min
 ```
+
+1. **Prometheus**'tan trafik metriği toplanır
+2. **ARIMA modeli** 5 dakika ilerisi için tahmin üretir
+3. **%95 güven aralığının üst sınırı** kullanılır → konservatif, güvenli
+4. **KEDA**, bu tahmini okuyarak pod sayısını belirler
+5. Trafik gelmeden önce pod'lar hazır olur → **cold-start gecikmesi ortadan kalkar**
 
 ---
 
-## ⚡ Quick Start
+## Kurulum
 
-### Prerequisites
+### Gereksinimler
 
-| Tool | Version | Download |
-|------|---------|----------|
-| Docker Desktop | Latest | [docker.com](https://www.docker.com/products/docker-desktop) |
-| Minikube | v1.32+ | [minikube.sigs.k8s.io](https://minikube.sigs.k8s.io/docs/start/) |
-| kubectl | Latest | [kubernetes.io](https://kubernetes.io/docs/tasks/tools/) |
-| Helm | v3.13+ | [helm.sh](https://helm.sh/docs/intro/install/) |
-| Python | 3.11+ | [python.org](https://www.python.org/downloads/) |
+- Python 3.10+
+- kubectl
+- Helm 3+
+- Kubernetes cluster (minikube, EKS, GKE, AKS...)
+- KEDA v2+
+- Prometheus + Pushgateway
 
-### Installation
+### pip ile Kur
 
-```powershell
-# 1. Clone the repository
-git clone https://github.com/yourname/AutoScaleOps-Product.git
-cd AutoScaleOps-Product
-
-# 2. Install Python dependencies
-pip install -r requirements.txt
-
-# 3. Run the installer
-python installer/install.py
-
-# 4. Start the system
-.\scripts\start.ps1
+```bash
+pip install autoscaleops
 ```
 
-### Access Points
+### Sistem Kontrolü
 
-| Service | URL |
-|---------|-----|
-| 🖥️ Dashboard | http://localhost:8501 |
-| 🌐 Application | http://localhost:8080 |
-| 📊 Prometheus | http://localhost:9090 |
-| 📤 Pushgateway | http://localhost:9091 |
-
----
-
-## 📁 Project Structure
-
-```
-AutoScaleOps-Product/
-├── app/                    # Flask web application
-│   ├── app.py
-│   ├── Dockerfile
-│   └── requirements.txt
-│
-├── ai-model/               # AI prediction engine (Auto-ARIMA)
-│   ├── predictor.py
-│   ├── Dockerfile
-│   └── requirements.txt
-│
-├── dashboard/              # Streamlit monitoring dashboard
-│   ├── dashboard.py
-│   ├── Dockerfile
-│   └── requirements.txt
-│
-├── charts/autoscaleops/    # Helm chart for Kubernetes deployment
-│   ├── Chart.yaml
-│   ├── values.yaml
-│   └── templates/
-│
-├── core/                   # Core system modules
-│   ├── instance_manager.py  # Unique instance ID
-│   ├── config_manager.py    # Encrypted config
-│   ├── security.py          # Secret management
-│   ├── kubernetes_manager.py # kubectl wrapper
-│   ├── tunnel_manager.py    # ngrok/Cloudflare
-│   └── logger.py            # Centralized logging
-│
-├── installer/              # Installation system
-│   └── install.py
-│
-├── scripts/                # Start/Stop scripts
-│   ├── start.ps1
-│   └── stop.ps1
-│
-├── docs/                   # Documentation
-├── tests/                  # Unit tests
-└── requirements.txt
+```bash
+autoscaleops doctor
 ```
 
 ---
 
-## 🔧 Usage
+## Hızlı Başlangıç
 
-### Start the System
-```powershell
-.\scripts\start.ps1
+### 1. Config Dosyası Oluştur
+
+```bash
+autoscaleops init \
+  --name myapp \
+  --image myapp:latest \
+  --port 8080 \
+  --namespace production
 ```
 
-### Stop the System
-```powershell
-.\scripts\stop.ps1           # Stops services, keeps Minikube running
-.\scripts\stop.ps1 -StopMinikube  # Also stops Minikube cluster
+Bu komut `autoscaleops.yaml` dosyasını oluşturur.
+
+### 2. Config'i Düzenle
+
+```yaml
+# autoscaleops.yaml
+project:
+  name: myapp
+  namespace: production
+
+app:
+  image: myapp:latest
+  port: 8080
+  replicas:
+    min: 2
+    max: 20
+
+metrics:
+  prometheus_url: "http://prometheus:9090"
+  pushgateway_url: "http://pushgateway:9091"
+  source_metric: "http_requests_total"   # kendi metriğini yaz
+
+arima:
+  forecast_horizon: 5    # kaç dakika ilerisi tahmin edilsin
+  ci_level: 0.95         # güven aralığı seviyesi
+
+keda:
+  threshold: 10          # pod başına düşen RPS
 ```
 
-### Run Load Test
-Open the Dashboard → **🔥 Yük Testi** tab → Set parameters → Click **Başlat**
+### 3. Doğrula
+
+```bash
+autoscaleops validate
+```
+
+### 4. Deploy Et
+
+```bash
+autoscaleops deploy
+```
+
+### 5. Durumu İzle
+
+```bash
+autoscaleops status
+```
 
 ---
 
-## 🔒 Security
+## CLI Komutları
 
-- API keys stored in **Windows Credential Manager**
-- Config encrypted with **AES-256**
-- Machine-specific encryption keys
-- Non-root Docker containers
-- Kubernetes NetworkPolicy isolation
-
-See [docs/SECURITY.md](docs/SECURITY.md) for details.
-
----
-
-## 📊 How It Works
-
-1. **Flask App** serves traffic and exposes Prometheus metrics
-2. **Prometheus** scrapes metrics every 15 seconds
-3. **AI Predictor** (Auto-ARIMA) predicts traffic 5 minutes ahead
-4. **KEDA** scales pods based on AI prediction
-5. **Dashboard** shows everything in real-time
+| Komut | Açıklama |
+|-------|----------|
+| `autoscaleops init` | Yeni config dosyası oluştur |
+| `autoscaleops validate` | Config'i doğrula ve ayarları göster |
+| `autoscaleops deploy` | Cluster'a deploy et |
+| `autoscaleops doctor` | Sistem gereksinimlerini kontrol et |
+| `autoscaleops status` | Cluster kaynaklarının durumunu göster |
+| `autoscaleops stop` | Deployment'ı kaldır |
+| `autoscaleops report --input metrics.csv` | Analiz raporu ve grafik üret |
 
 ---
 
-## 📄 License
+## Neden ARIMA?
 
-MIT License — see [LICENSE](LICENSE) for details.
+| Özellik | Reaktif (CPU) | ARIMA (AutoScaleOps) |
+|---------|--------------|----------------------|
+| Karar zamanı | Trafik geldikten sonra | Trafik gelmeden önce |
+| Cold-start riski | Yüksek | Düşük |
+| Güven aralığı | Yok | %95 CI |
+| p99 latency | ~350ms | ~70ms |
+| Yanlış alarm | Var | ADF testi ile azaltılmış |
+
+### Deneysel Bulgular
+
+5 model (ARIMA, EMA, Holt-Winters, Prophet, Naive) walk-forward cross-validation ile karşılaştırılmıştır:
+
+| Model | MAPE (5dk) | MAPE (30dk) | Compute |
+|-------|-----------|------------|---------|
+| EMA | %11.7 | %11.9 | <1ms |
+| ARIMA | %15.3 | %16.3 | ~7500ms |
+| Prophet | %15.4 | %34.7 | ~375ms |
+
+**EMA daha doğru tahmin eder, ARIMA daha iyi karar verir.**
+ARIMA'nın güven aralığı üretebilmesi üretim ortamında kritiktir.
+EMA tek bir sayı döndürür; ARIMA "en kötü ihtimalle şu kadar gelir, ona göre hazırlan" diyebilir.
+
+---
+
+## Desteklenen Metrikler
+
+Herhangi bir Prometheus gauge/counter metriği kullanılabilir:
+
+```yaml
+metrics:
+  source_metric: "http_requests_total"           # Flask/FastAPI
+  source_metric: "nginx_http_requests_total"     # NGINX
+  source_metric: "istio_requests_total"          # Istio
+  source_metric: "myapp_api_calls_count"         # Custom
+```
+
+---
+
+## Proje Yapısı
+
+```
+autoscaleops/
+├── __init__.py
+├── cli.py              # CLI komutları
+├── config.py           # YAML config yükleyici
+├── deploy.py           # kubectl/helm operasyonları
+└── templates/
+    └── autoscaleops.yaml.j2
+
+ai-model/
+└── predictor.py        # ARIMA predictor (Kubernetes pod)
+
+charts/
+└── autoscaleops/       # Helm chart
+    ├── Chart.yaml
+    ├── values.yaml
+    └── templates/
+
+analiz.py               # Deney analiz ve grafik aracı
+```
+
+---
+
+## Akademik Arka Plan
+
+Bu proje, proaktif Kubernetes ölçeklemenin reaktif yöntemlere karşı avantajını deneysel olarak ölçmek amacıyla geliştirilmiştir.
+
+**Temel bulgular:**
+- ARIMA tabanlı proaktif ölçekleme, reaktif ölçeklemeye kıyasla p95 latency'yi **%35 azaltmıştır**
+- Yüksek gecikme (>150ms p99) olayları **%60 azalmıştır** (126 → 50 örnek)
+- İstatistiksel anlamlılık: Welch t-test ve Mann-Whitney U test (p < 0.0001)
+
+---
+
+## Lisans
+
+MIT License
+
+---
+
+## Katkıda Bulunmak
+
+```bash
+git clone https://github.com/Fknorl/AutoScaleOps.git
+cd AutoScaleOps
+pip install -e ".[dev]"
+```

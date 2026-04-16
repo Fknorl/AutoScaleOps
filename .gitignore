@@ -27,3 +27,8 @@ results_combined_AB.csv
 .DS_Store
 desktop.ini
 Thumbs.db
+node_modules/
+.dashboard_state/
+*.bat
+rapor_*.txt
+installer/

@@ -19,11 +19,18 @@ FALSE_ALARM_TIMEOUT    = int(os.getenv("FALSE_ALARM_TIMEOUT",    "300"))
 FORECAST_HORIZON       = int(os.getenv("FORECAST_HORIZON",       "5"))   # tahmin ufku (dakika)
 CI_LEVEL               = float(os.getenv("CI_LEVEL",             "0.95")) # güven aralığı seviyesi
 
+# ── Generic metric desteği ────────────────────────────────────────────────────
+# Kullanıcı kendi Prometheus metriğini autoscaleops.yaml'da tanımlar.
+# Örnek: http_requests_total, nginx_http_requests_total, myapp_requests_count
+SOURCE_METRIC      = os.getenv("SOURCE_METRIC",      "http_requests_total")
+PREDICTION_METRIC  = os.getenv("PREDICTION_METRIC",  "predicted_rps_30min")
+
 # ── Prometheus Metrics ───────────────────────────────────────────────────────
 registry    = CollectorRegistry()
 
 # Ana tahmin metriği (KEDA tarafından okunur)
-g_predicted = Gauge('predicted_rps_30min',
+# PREDICTION_METRIC env'den gelir — autoscaleops.yaml'da tanımlanır
+g_predicted = Gauge(PREDICTION_METRIC,
                     'AI tarafindan belirlenen hedef trafik',
                     registry=registry)
 
@@ -55,6 +62,8 @@ g_data_points = Gauge('arima_training_data_points',
 print("🧠 Yapay Zeka (Auto-ARIMA) Başlatılıyor...")
 print(f"🔗 Prometheus:       {PROMETHEUS_URL}")
 print(f"🔗 Pushgateway:      {PUSHGATEWAY_URL}")
+print(f"📡 Kaynak Metrik:    {SOURCE_METRIC}")
+print(f"📤 Tahmin Metrik:    {PREDICTION_METRIC}")
 print(f"📡 Tahmin Ufku:      {FORECAST_HORIZON} dakika")
 print(f"📊 Güven Aralığı:    %{int(CI_LEVEL*100)}")
 
@@ -78,7 +87,7 @@ def get_history_data(window_minutes=240):
     Prometheus'tan son window_minutes dakikanın trafik verisini çeker.
     IQR yöntemiyle outlier'ları temizler.
     """
-    query = 'sum(rate(http_requests_total[2m]))'
+    query = f'sum(rate({SOURCE_METRIC}[2m]))'
     start_time = time.time() - (window_minutes * 60)
     end_time   = time.time()
 
@@ -114,7 +123,7 @@ def get_history_data(window_minutes=240):
 
 def get_current_rps():
     """Anlık gerçek trafiği çeker."""
-    query = 'sum(rate(http_requests_total[1m]))'
+    query = f'sum(rate({SOURCE_METRIC}[1m]))'
     try:
         response = requests.get(
             f"{PROMETHEUS_URL}/api/v1/query",

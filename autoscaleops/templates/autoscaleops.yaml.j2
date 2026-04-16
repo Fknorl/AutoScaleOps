@@ -1,0 +1,64 @@
+# ═══════════════════════════════════════════════════════════════════════════
+# AutoScaleOps Configuration
+# Oluşturulma: {{ created_at }}
+# Düzenle ve 'autoscaleops deploy' komutunu çalıştır.
+# ═══════════════════════════════════════════════════════════════════════════
+
+project:
+  # Uygulamanın adı (Kubernetes kaynak isimlerinde kullanılır)
+  name: {{ project_name }}
+  # Kubernetes namespace
+  namespace: {{ namespace }}
+
+app:
+  # Uygulamanın Docker image'ı
+  image: {{ app_image }}
+  # Uygulamanın dinlediği port
+  port: {{ app_port }}
+  replicas:
+    min: 2      # Minimum pod sayısı
+    max: 10     # Maximum pod sayısı
+
+metrics:
+  # Prometheus adresi (cluster içi)
+  prometheus_url: "http://prometheus-kube-prometheus-prometheus.monitoring.svc.cluster.local:9090"
+  # Pushgateway adresi (ARIMA tahminlerini buraya yazar)
+  pushgateway_url: "http://pushgateway.monitoring.svc.cluster.local:9091"
+  # Takip edilecek Prometheus metriği (uygulamanın RPS metriği)
+  source_metric: "http_requests_total"
+  # ARIMA'nın KEDA için üreteceği tahmin metriği (değiştirme)
+  prediction_metric: "predicted_rps_30min"
+
+arima:
+  # Kaç adım ilerisi tahmin edilsin (dakika)
+  forecast_horizon: 5
+  # Güven aralığı seviyesi (üst sınır pod kararında kullanılır)
+  ci_level: 0.95
+  # Kaç döngüde bir model yeniden eğitilsin
+  retrain_every: 30
+  # Model eğitimi için minimum veri noktası sayısı
+  min_data_points: 30
+
+keda:
+  # Pod başına düşen RPS eşiği (pod sayısı = tahmin / threshold)
+  threshold: 10
+  # KEDA'nın metriği kaç saniyede bir kontrol edeceği
+  polling_interval: 15
+  # Scale-down için bekleme süresi (saniye)
+  cooldown_period: 60
+
+resources:
+  app:
+    requests:
+      cpu: "100m"
+      memory: "128Mi"
+    limits:
+      cpu: "500m"
+      memory: "512Mi"
+  predictor:
+    requests:
+      cpu: "200m"
+      memory: "256Mi"
+    limits:
+      cpu: "1000m"
+      memory: "1Gi"
