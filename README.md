@@ -24,7 +24,33 @@ http_requests_total       CI upper bound            predicted_rps_30min
 
 ## Kurulum
 
-### Gereksinimler
+### 🖥️ Masaüstü Uygulaması (Önerilen — Sıfır Terminal Bilgisi Gerekir)
+
+Windows kullanıcıları için her şeyi otomatik kuran tek tıklık yükleyici:
+
+```
+1. Repoyu indir:
+   git clone https://github.com/Fknorl/AutoScaleOps.git
+   — veya — GitHub'dan "Code > Download ZIP" ile indir, çıkart
+
+2. AutoScaleOps.bat dosyasına çift tıkla
+```
+
+**Geri kalan her şey otomatik:**
+- Python yoksa → winget ile kurar
+- Docker Desktop yoksa → winget ile kurar, başlatır
+- Minikube / kubectl / Helm yoksa → winget ile kurar
+- Kubernetes cluster'ı başlatır
+- Prometheus + KEDA'yı Helm ile kurar
+- Masaüstü uygulamasını açar
+
+> **Not:** İlk açılışta kurulum 5–10 dakika sürebilir (Docker ve Kubernetes indirme). Sonraki açılışlarda doğrudan uygulamaya girer.
+
+---
+
+### ⚙️ CLI / Framework Kurulumu (Geliştirici)
+
+#### Gereksinimler
 
 - Python 3.10+
 - kubectl
@@ -33,13 +59,13 @@ http_requests_total       CI upper bound            predicted_rps_30min
 - KEDA v2+
 - Prometheus + Pushgateway
 
-### pip ile Kur
+#### pip ile Kur
 
 ```bash
 pip install autoscaleops
 ```
 
-### Sistem Kontrolü
+#### Sistem Kontrolü
 
 ```bash
 autoscaleops doctor

@@ -29,6 +29,5 @@ desktop.ini
 Thumbs.db
 node_modules/
 .dashboard_state/
-*.bat
 rapor_*.txt
 installer/
