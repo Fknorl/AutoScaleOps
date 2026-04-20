@@ -31,3 +31,20 @@ node_modules/
 .dashboard_state/
 rapor_*.txt
 installer/
+
+# Geçici patch / analiz scriptleri
+do_patch.py
+patch_wizard.py
+replace_wizard.py
+remove_panels.py
+new_wizard_block.txt
+final_karsilastirma*.txt
+final_rapor*.txt
+spike_results*.csv
+
+# Build çıktıları
+build/
+dist/
+
+# Claude iç dosyaları
+.claude/
