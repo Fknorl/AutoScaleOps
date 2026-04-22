@@ -5,28 +5,16 @@ $ErrorActionPreference = "Continue"
 Clear-Host
 Write-Host ""
 Write-Host "  =============================================" -ForegroundColor Cyan
-Write-Host "         AutoScaleOps  -  Baslatma Sihirbazi  " -ForegroundColor Cyan
+Write-Host "       AutoScaleOps  -  Baslatma Sihirbazi    " -ForegroundColor Cyan
 Write-Host "  =============================================" -ForegroundColor Cyan
 Write-Host ""
 
 $SCRIPT_DIR = Split-Path -Parent $MyInvocation.MyCommand.Path
 $TOTAL_STEPS = 9
 
-# ─────────────────────────────────────────────────────────────────────────────
-# WINGET VARLIK KONTROLU  (winget yoksa sessizce atla)
-# ─────────────────────────────────────────────────────────────────────────────
-function EnsureWinget {
-    if (IsInstalled "winget") { return $true }
-    Write-Host ""
-    Write-Host "  [!] winget bulunamadi." -ForegroundColor Yellow
-    Write-Host "      Windows 10 1809+ veya Windows 11 gerektirir." -ForegroundColor Gray
-    Write-Host "      winget.microsoft.com adresinden yukleyebilirsiniz." -ForegroundColor Gray
-    return $false
-}
-
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # YARDIMCI FONKSIYONLAR
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 function Step($n, $msg) {
     Write-Host ""
     Write-Host "  [$n/$TOTAL_STEPS] $msg" -ForegroundColor Yellow
@@ -60,19 +48,28 @@ function RefreshPath {
                 [System.Environment]::GetEnvironmentVariable("PATH","User")
 }
 
-# ─────────────────────────────────────────────────────────────────────────────
+function EnsureWinget {
+    if (IsInstalled "winget") { return $true }
+    Write-Host ""
+    Write-Host "  [!] winget bulunamadi." -ForegroundColor Yellow
+    Write-Host "      Windows 10 1809+ veya Windows 11 gerektirir." -ForegroundColor Gray
+    Write-Host "      winget.microsoft.com adresinden yukleyebilirsiniz." -ForegroundColor Gray
+    return $false
+}
+
+# -----------------------------------------------------------------------------
 # [1/9] PYTHON
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 Step 1 "Python kontrol ediliyor..."
 
 if (-not (IsInstalled "python")) {
-    WARN "Python bulunamadi — winget ile otomatik yukleniyor..."
+    WARN "Python bulunamadi - winget ile otomatik yukleniyor..."
 
     if (-not (EnsureWinget)) {
         ERR "Python bulunamadi ve winget de yok!"
         ERR "Lutfen python.org/downloads adresinden Python 3.11+ kurun."
         ERR "Kurulumda 'Add Python to PATH' secenegini mutlaka isaretleyin!"
-        Read-Host "`n  Kurup tekrar calistirin — Enter ile cik"
+        Read-Host "`n  Kurup tekrar calistirin - Enter ile cik"
         exit 1
     }
 
@@ -86,10 +83,8 @@ if (-not (IsInstalled "python")) {
 
     RefreshPath
 
-    # winget PATH'i aninda guncellemiyor olabilir — py launcher'i dene
     if (-not (IsInstalled "python")) {
         if (IsInstalled "py") {
-            # py launcher uzerinden calis
             Set-Alias python (py -3 -c "import sys; print(sys.executable)" 2>&1)
         }
         RefreshPath
@@ -117,9 +112,9 @@ python -m pip install PyQt6 PyQt6-Qt6 PyQt6-sip matplotlib requests psutil `
     ForEach-Object { INFO $_ }
 OK "Python paketleri hazir."
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # [2/9] DOCKER DESKTOP
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 Step 2 "Docker Desktop kontrol ediliyor..."
 
 $dockerRunning = $false
@@ -135,10 +130,10 @@ if ($LASTEXITCODE -eq 0) {
     $dockerExe = $dockerExePaths | Where-Object { Test-Path $_ } | Select-Object -First 1
 
     if ($dockerExe) {
-        WARN "Docker kurulu ama kapali — baslatiliyor..."
+        WARN "Docker kurulu ama kapali - baslatiliyor..."
         Start-Process $dockerExe
     } else {
-        WARN "Docker bulunamadi — yukleniyor (2-5 dk)..."
+        WARN "Docker bulunamadi - yukleniyor (2-5 dk)..."
         WingetInstall "Docker.DockerDesktop" "Docker Desktop" | Out-Null
         RefreshPath
         $dockerExe = $dockerExePaths | Where-Object { Test-Path $_ } | Select-Object -First 1
@@ -162,41 +157,41 @@ if ($LASTEXITCODE -eq 0) {
     }
 }
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # [3/9] MINIKUBE
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 Step 3 "Minikube kontrol ediliyor..."
 
 if (-not (IsInstalled "minikube")) {
-    WARN "Minikube bulunamadi — yukleniyor..."
+    WARN "Minikube bulunamadi - yukleniyor..."
     WingetInstall "Kubernetes.minikube" "Minikube" | Out-Null
     RefreshPath
 }
 if (IsInstalled "minikube") { OK "Minikube hazir." }
-else { WARN "Minikube PATH'te gorunmuyor — terminali yeniden ac." }
+else { WARN "Minikube PATH'te gorunmuyor - terminali yeniden ac." }
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # [4/9] KUBECTL + HELM
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 Step 4 "kubectl ve Helm kontrol ediliyor..."
 
 if (-not (IsInstalled "kubectl")) {
-    WARN "kubectl bulunamadi — yukleniyor..."
+    WARN "kubectl bulunamadi - yukleniyor..."
     WingetInstall "Kubernetes.kubectl" "kubectl" | Out-Null
     RefreshPath
 }
 OK "kubectl: $(kubectl version --client --short 2>&1 | Select-Object -First 1)"
 
 if (-not (IsInstalled "helm")) {
-    WARN "Helm bulunamadi — yukleniyor..."
+    WARN "Helm bulunamadi - yukleniyor..."
     WingetInstall "Helm.Helm" "Helm" | Out-Null
     RefreshPath
 }
 OK "Helm: $(helm version --short 2>&1)"
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # [5/9] KUBERNETES CLUSTER
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 Step 5 "Kubernetes cluster hazirlaniyor..."
 
 $PROFILE_NAME = $null
@@ -229,9 +224,9 @@ kubectl create namespace $PROFILE_NAME --dry-run=client -o yaml 2>$null |
     kubectl apply -f - 2>&1 | Out-Null
 OK "Namespace hazir: $PROFILE_NAME"
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # [6/9] PROMETHEUS + PUSHGATEWAY
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 Step 6 "Prometheus + Pushgateway kontrol ediliyor..."
 
 $promExists = helm status prometheus -n monitoring 2>&1
@@ -247,7 +242,7 @@ if ($LASTEXITCODE -eq 0) {
         --set alertmanager.enabled=false `
         --wait --timeout 5m 2>&1 | Select-Object -Last 3
     if ($LASTEXITCODE -eq 0) { OK "Prometheus kuruldu." }
-    else { WARN "Prometheus kurulamadi — dashboard metrikleri calismayabilir." }
+    else { WARN "Prometheus kurulamadi - dashboard metrikleri calismayabilir." }
 }
 
 $pgExists = helm status pushgateway -n monitoring 2>&1
@@ -262,9 +257,9 @@ if ($LASTEXITCODE -eq 0) {
     else { WARN "Pushgateway kurulamadi." }
 }
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # [7/9] KEDA
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 Step 7 "KEDA kontrol ediliyor..."
 
 $kedaExists = kubectl get namespace keda 2>&1
@@ -278,12 +273,12 @@ if ($LASTEXITCODE -eq 0) {
         --namespace keda --create-namespace `
         --wait --timeout 3m 2>&1 | Select-Object -Last 2
     if ($LASTEXITCODE -eq 0) { OK "KEDA kuruldu." }
-    else { WARN "KEDA kurulamadi — otomatik olcekleme calismayabilir." }
+    else { WARN "KEDA kurulamadi - otomatik olcekleme calismayabilir." }
 }
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # [8/9] AUTOSCALEOPS CLI
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 Step 8 "AutoScaleOps CLI kontrol ediliyor..."
 
 Set-Location $SCRIPT_DIR
@@ -295,16 +290,14 @@ if ($LASTEXITCODE -eq 0) {
     python -m pip install -e . --quiet 2>&1 | Out-Null
     $cliCheck = autoscaleops --version 2>&1
     if ($LASTEXITCODE -eq 0) { OK "CLI yuklendi: $cliCheck" }
-    else { WARN "CLI yuklenemedi — manuel: pip install -e ." }
+    else { WARN "CLI yuklenemedi - manuel: pip install -e ." }
 }
 
-# autoscaleops doctor ile ozet kontrol
-Write-Host ""
 autoscaleops doctor 2>&1
 
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 # [9/9] UYGULAMAYI BASLAT
-# ─────────────────────────────────────────────────────────────────────────────
+# -----------------------------------------------------------------------------
 Step 9 "Uygulama baslatiliyor..."
 
 Write-Host ""
@@ -316,7 +309,6 @@ Write-Host ""
 Set-Location $SCRIPT_DIR
 python autoscaleops_app.py
 
-# Cikis
 Write-Host ""
 if ($LASTEXITCODE -ne 0) {
     ERR "Uygulama hatayla kapandi. Yukari kaydiriniz."
