@@ -175,13 +175,27 @@ OK "Python mevcut: $pyver"
 
 INFO "Gerekli Python paketleri yukleniyor..."
 python -m pip install --upgrade pip --quiet 2>&1 | Out-Null
-python -m pip install PyQt6 PyQt6-Qt6 PyQt6-sip matplotlib requests psutil `
-    cryptography urllib3 pyyaml click rich jinja2 --quiet 2>&1 | Out-Null
-if ($LASTEXITCODE -eq 0) {
-    OK "Python paketleri hazir."
-} else {
+
+# Zorunlu GUI paketleri
+python -m pip install `
+    PyQt6 PyQt6-Qt6 PyQt6-sip `
+    matplotlib requests psutil `
+    cryptography urllib3 pyyaml `
+    click rich jinja2 `
+    prometheus-client `
+    --quiet 2>&1 | Out-Null
+$coreOk = $LASTEXITCODE -eq 0
+
+# Analiz/AI paketleri (agir, hata olsa devam et)
+INFO "Analiz paketleri yukleniyor (pmdarima, streamlit vb.)..."
+python -m pip install `
+    pmdarima statsmodels pandas numpy scipy scikit-learn streamlit plotly `
+    --quiet 2>&1 | Out-Null
+
+if ($coreOk) { OK "Python paketleri hazir." }
+else {
     WARN "Bazi paketler yuklenemedi - tekrar deneniyor..."
-    python -m pip install PyQt6 matplotlib requests psutil cryptography pyyaml --quiet 2>&1 | Out-Null
+    python -m pip install PyQt6 matplotlib requests psutil prometheus-client --quiet 2>&1 | Out-Null
     if ($LASTEXITCODE -eq 0) { OK "Temel Python paketleri hazir." }
     else { WARN "Paket kurulumu basarisiz - uygulama hata verebilir." }
 }
@@ -294,13 +308,21 @@ if (IsInstalled "helm") {
 # -----------------------------------------------------------------------------
 Step 5 "Kubernetes cluster hazirlaniyor..."
 
+# Eski autoscaleops-{hash} profillerini temizle (onceki yanlis kurulumlar)
 $PROFILE_NAME = "autoscaleops"
 try {
     $jsonRaw = minikube profile list -o json 2>&1
     if ($LASTEXITCODE -eq 0 -and $jsonRaw) {
         $profiles = $jsonRaw | ConvertFrom-Json
-        $existing = $profiles.valid | Where-Object { $_.Name -like "autoscaleops*" } | Select-Object -First 1
-        if ($existing) { $PROFILE_NAME = $existing.Name }
+        $allProfiles = @($profiles.valid) + @($profiles.invalid) | Where-Object { $_ -ne $null }
+        $oldProfiles = $allProfiles | Where-Object {
+            $_.Name -like "autoscaleops-*"   # hash'li eski profiller
+        }
+        foreach ($old in $oldProfiles) {
+            WARN "Eski profil siliniyor: $($old.Name)"
+            minikube delete -p $old.Name 2>&1 | Out-Null
+            OK "Silindi: $($old.Name)"
+        }
     }
 } catch {}
 INFO "Profil: $PROFILE_NAME"

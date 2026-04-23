@@ -5173,10 +5173,10 @@ class SystemCheckWorker(QThread):
             checks["kubectl"] = {"ok": False, "label": "kubectl",
                                  "detail": "Kurulu değil — indirip yükleyin"}
 
-        # ngrok  (PATH veya .autoscaleops/tools içinde)
+        # ngrok — opsiyonel, ihtiyac olunca otomatik indirilir, bloklamaz
         ngrok_paths = ["ngrok", str(NGROK_EXE)]
         ngrok_ok = False
-        ngrok_detail = "Kurulu değil"
+        ngrok_detail = "Otomatik indirilecek"
         for np in ngrok_paths:
             try:
                 r = subprocess.run([np, "version"], capture_output=True, text=True, timeout=8)
@@ -5186,16 +5186,18 @@ class SystemCheckWorker(QThread):
                     break
             except Exception:
                 continue
-        checks["ngrok"] = {"ok": ngrok_ok, "label": "ngrok", "detail": ngrok_detail}
+        # ngrok eksik olsa bile ok=True — kullanici Live Mode actigi anda indirilir
+        checks["ngrok"] = {"ok": True, "label": "ngrok",
+                           "detail": ngrok_detail if ngrok_ok else "Otomatik indirilecek (Live Mode)"}
 
-        # Python paketleri
+        # Python paketleri — sadece GUI icin zorunlu olanlar kontrol edilir
+        # streamlit/pmdarima gibi agir paketler buradan cikarildi (ihtiyac olunca kurulur)
         required = [
-            ("PyQt6",               "PyQt6"),
-            ("streamlit",           "streamlit"),
-            ("pmdarima",            "pmdarima"),
-            ("prometheus_client",   "prometheus_client"),
-            ("psutil",              "psutil"),
-            ("requests",            "requests"),
+            ("PyQt6",             "PyQt6"),
+            ("prometheus_client", "prometheus_client"),
+            ("psutil",            "psutil"),
+            ("requests",          "requests"),
+            ("matplotlib",        "matplotlib"),
         ]
         missing = []
         for display_name, import_name in required:
@@ -5205,7 +5207,7 @@ class SystemCheckWorker(QThread):
                 missing.append(display_name)
         if not missing:
             checks["python_deps"] = {"ok": True, "label": "Python Paketleri",
-                                     "detail": "Tüm paketler kurulu"}
+                                     "detail": "Tum paketler kurulu"}
         else:
             checks["python_deps"] = {"ok": False, "label": "Python Paketleri",
                                      "detail": f"Eksik: {', '.join(missing)}"}
@@ -8064,15 +8066,17 @@ class AppController(QObject):
         self._prereq_worker.start()
 
     def _on_prereq_result(self, checks: dict):
-        missing = [v["label"] for v in checks.values() if not v["ok"]]
+        # Sadece gercekten kritik olanlari goster (ngrok opsiyonel, atlaniyor)
+        CRITICAL_KEYS = {"docker", "minikube", "kubectl", "python_deps"}
+        missing = [v["label"] for k, v in checks.items()
+                   if k in CRITICAL_KEYS and not v["ok"]]
         if missing and self._main_app:
-            self._main_app._nav_select(1)   # Dashboard sekmesine git
             QTimer.singleShot(200, lambda: QMessageBox.warning(
                 self._main_app,
                 "Eksik Gereksinimler",
-                f"Bazı bileşenler eksik veya çalışmıyor:\n\n"
-                + "\n".join(f"  • {m}" for m in missing)
-                + "\n\nLütfen Sistem sekmesinden kurulumu tamamlayın."
+                f"Bazi bileesenler eksik veya calismıyor:\n\n"
+                + "\n".join(f"  * {m}" for m in missing)
+                + "\n\nLutfen fix.ps1'i yeniden calistirip kurulumu tamamlayin."
             ))
 
     def _show_main_app(self):
