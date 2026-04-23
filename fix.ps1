@@ -43,8 +43,8 @@ function IsPythonReal {
 function RefreshPath {
     $machinePath = [System.Environment]::GetEnvironmentVariable("PATH", "Machine")
     $userPath    = [System.Environment]::GetEnvironmentVariable("PATH", "User")
-    $combined    = @($machinePath, $userPath) | Where-Object { $_ } | Join-String -Separator ";"
-    if ($combined) { $env:PATH = $combined }
+    $parts = @($machinePath, $userPath) | Where-Object { $_ }
+    if ($parts) { $env:PATH = $parts -join ";" }
 }
 
 function DisableWindowsPythonStub {
