@@ -85,7 +85,7 @@ function WingetInstall($pkgId, $pkgName) {
 }
 
 # -----------------------------------------------------------------------------
-# KURULUM DURUMU KONTROL — setup_complete.json varsa saglik kontrolu yap
+# KURULUM DURUMU KONTROL - setup_complete.json varsa saglik kontrolu yap
 # -----------------------------------------------------------------------------
 $setupFile = "$env:USERPROFILE\.autoscaleops\setup_complete.json"
 $appPath   = Join-Path $SCRIPT_DIR "autoscaleops_app.py"
@@ -93,7 +93,7 @@ $appPath   = Join-Path $SCRIPT_DIR "autoscaleops_app.py"
 function QuickHealthCheck {
     Write-Host "  Sistem saglik kontrolu yapiliyor..." -ForegroundColor Cyan
 
-    # 1. Python gercekten calisıyor mu?
+    # 1. Python gercekten calisiyor mu?
     if (-not (IsPythonReal)) {
         WARN "Python saglik kontrolu basarisiz."
         return $false
@@ -102,14 +102,14 @@ function QuickHealthCheck {
     # 2. Docker calisiyor mu?
     docker info 2>&1 | Out-Null
     if ($LASTEXITCODE -ne 0) {
-        WARN "Docker calismıyor."
+        WARN "Docker calismiyor."
         return $false
     }
 
     # 3. Minikube 'autoscaleops' profili var ve calisiyor mu?
     minikube status -p autoscaleops 2>&1 | Out-Null
     if ($LASTEXITCODE -ne 0) {
-        WARN "Minikube cluster calismıyor."
+        WARN "Minikube cluster calismiyor."
         return $false
     }
 
@@ -126,10 +126,10 @@ function QuickHealthCheck {
 
 if (Test-Path $setupFile) {
     Write-Host ""
-    Write-Host "  Onceki kurulum bulundu — kontrol ediliyor..." -ForegroundColor Cyan
+    Write-Host "  Onceki kurulum bulundu - kontrol ediliyor..." -ForegroundColor Cyan
 
     if (QuickHealthCheck) {
-        # Her sey sagliklı — direkt uygulamayi ac
+        # Her sey saglikli - direkt uygulamayi ac
         Write-Host ""
         Write-Host "  =============================================" -ForegroundColor Cyan
         Write-Host "   Sistemler hazir! Uygulama aciliyor...       " -ForegroundColor Green
@@ -147,7 +147,7 @@ if (Test-Path $setupFile) {
         }
         exit 0
     } else {
-        # Eksik/bozuk kurulum tespit edildi — tam kurulum yeniden calisacak
+        # Eksik/bozuk kurulum tespit edildi - tam kurulum yeniden calisacak
         Write-Host ""
         WARN "Eksik veya bozuk kurulum tespit edildi."
         WARN "Tam kurulum yeniden baslatiliyor..."
@@ -477,7 +477,7 @@ if ($cliExists) {
 }
 
 # -----------------------------------------------------------------------------
-# [8b] KURULUM KAYDEDILIYOR — instance.json + setup_complete.json
+# [8b] KURULUM KAYDEDILIYOR - instance.json + setup_complete.json
 # -----------------------------------------------------------------------------
 $autoscaleopsDir = "$env:USERPROFILE\.autoscaleops"
 New-Item -ItemType Directory -Force -Path $autoscaleopsDir | Out-Null
