@@ -5414,6 +5414,45 @@ class SystemPanel(QWidget):
 
 
 # ─────────────────────────────────────────────
+#  PANEL 6.5 — ACTIVITY LOG
+# ─────────────────────────────────────────────
+class ActivityLogPanel(QWidget):
+    def __init__(self, db, parent=None):
+        super().__init__(parent)
+        self.db = db
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(32, 32, 32, 32)
+        lay.setSpacing(16)
+
+        title = QLabel("Aktivite Logu")
+        title.setStyleSheet(
+            f"color:{C_TEXT}; font-size:20px; font-weight:700; background:transparent; border:none;"
+        )
+        sub = QLabel("Sistem olayları ve işlem geçmişi")
+        sub.setStyleSheet(
+            f"color:{C_TEXT_DIM}; font-size:12px; background:transparent; border:none;"
+        )
+        lay.addWidget(title)
+        lay.addWidget(sub)
+
+        self._log = LogWidget()
+        self._log.setMinimumHeight(400)
+        lay.addWidget(self._log, 1)
+
+        btn_clear = QPushButton("Logu Temizle")
+        btn_clear.setFixedHeight(36)
+        btn_clear.setFixedWidth(140)
+        btn_clear.clicked.connect(self._log.clear)
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+        btn_row.addWidget(btn_clear)
+        lay.addLayout(btn_row)
+
+    def append_line(self, msg: str, level: str = "info"):
+        self._log.append_line(msg, level)
+
+
+# ─────────────────────────────────────────────
 #  PANEL 7 — TROUBLESHOOTER
 # ─────────────────────────────────────────────
 class TroubleshooterPanel(QWidget):

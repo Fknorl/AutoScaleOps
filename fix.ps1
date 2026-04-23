@@ -85,7 +85,29 @@ function WingetInstall($pkgId, $pkgName) {
 }
 
 # -----------------------------------------------------------------------------
-# KURULUM ON IZNI
+# KURULUM DURUMU KONTROL — setup_complete.json varsa direkt basla
+# -----------------------------------------------------------------------------
+$setupFile   = "$env:USERPROFILE\.autoscaleops\setup_complete.json"
+$appPath     = Join-Path $SCRIPT_DIR "autoscaleops_app.py"
+
+if (Test-Path $setupFile) {
+    Write-Host "  Kurulum mevcut, uygulama baslatiliyor..." -ForegroundColor Green
+    Write-Host ""
+    if (-not (Test-Path $appPath)) {
+        ERR "autoscaleops_app.py bulunamadi: $appPath"
+        Read-Host "Enter ile cik"; exit 1
+    }
+    Set-Location $SCRIPT_DIR
+    python autoscaleops_app.py
+    if ($LASTEXITCODE -ne 0) {
+        ERR "Uygulama hatayla kapandi. Yukari kaydiriniz."
+        Read-Host "Enter ile cik"
+    }
+    exit 0
+}
+
+# -----------------------------------------------------------------------------
+# KURULUM ON IZNI (sadece ilk kurulumda gosterilir)
 # -----------------------------------------------------------------------------
 Write-Host "  Su araclar kontrol edilecek ve eksikse kurulacak:" -ForegroundColor White
 Write-Host "    - Python 3.11" -ForegroundColor Gray
@@ -380,6 +402,36 @@ if ($cliExists) {
         WARN "pyproject.toml bulunamadi - CLI atlandi."
     }
 }
+
+# -----------------------------------------------------------------------------
+# [8b] KURULUM KAYDEDILIYOR — instance.json + setup_complete.json
+# -----------------------------------------------------------------------------
+$autoscaleopsDir = "$env:USERPROFILE\.autoscaleops"
+New-Item -ItemType Directory -Force -Path $autoscaleopsDir | Out-Null
+
+# instance.json: app'in kullanacagi cluster bilgileri
+# fix.ps1'in olusturdugu "autoscaleops" profiliyle eslestirilir
+$instanceFile = "$autoscaleopsDir\instance.json"
+if (-not (Test-Path $instanceFile)) {
+    $instanceData = @{
+        instance_id      = "default"
+        namespace        = "autoscaleops"
+        minikube_profile = "autoscaleops"
+        created_at       = (Get-Date -Format "o")
+    } | ConvertTo-Json
+    Set-Content -Path $instanceFile -Value $instanceData -Encoding UTF8
+    OK "Instance kaydedildi (profil: autoscaleops)"
+} else {
+    OK "Instance zaten mevcut."
+}
+
+# setup_complete.json: wizard'in tekrar acilmasini onler
+$setupData = @{
+    completed_at = (Get-Date -Format "o")
+    version      = "fix.ps1"
+} | ConvertTo-Json
+Set-Content -Path "$autoscaleopsDir\setup_complete.json" -Value $setupData -Encoding UTF8
+OK "Kurulum kaydedildi - wizard bir daha acilmayacak."
 
 # -----------------------------------------------------------------------------
 # [9/9] UYGULAMAYI BASLAT
