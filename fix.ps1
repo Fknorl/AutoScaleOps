@@ -31,18 +31,32 @@ function IsInstalled($cmd) {
     return [bool](Get-Command $cmd -ErrorAction SilentlyContinue)
 }
 
+# Windows Store sahte Python stub'ini atlamak icin gercek Python kontrolu
+function IsPythonReal {
+    try {
+        $ver = python --version 2>&1
+        if ($ver -match "Python \d+\.\d+\.\d+") { return $true }
+    } catch {}
+    return $false
+}
+
 function RefreshPath {
     $machinePath = [System.Environment]::GetEnvironmentVariable("PATH", "Machine")
     $userPath    = [System.Environment]::GetEnvironmentVariable("PATH", "User")
-    if ($machinePath -and $userPath) {
-        $env:PATH = $machinePath + ";" + $userPath
-    } elseif ($machinePath) {
-        $env:PATH = $machinePath
-    } elseif ($userPath) {
-        $env:PATH = $userPath
+    $combined    = @($machinePath, $userPath) | Where-Object { $_ } | Join-String -Separator ";"
+    if ($combined) { $env:PATH = $combined }
+}
+
+function DisableWindowsPythonStub {
+    # Windows 10/11, Python kurulu olmadigi halde python.exe stub'i olusturuyor
+    # Bu stub "Python bulunamadi" diyerek Microsoft Store'u aciyor
+    $stubPath = "$env:LOCALAPPDATA\Microsoft\WindowsApps"
+    if (Test-Path "$stubPath\python.exe") {
+        try {
+            Remove-Item "$stubPath\python.exe"  -ErrorAction SilentlyContinue
+            Remove-Item "$stubPath\python3.exe" -ErrorAction SilentlyContinue
+        } catch {}
     }
-    # Komut cache'ini temizle
-    $env:PATH = $env:PATH
 }
 
 function EnsureWinget {
@@ -61,7 +75,7 @@ function WingetInstall($pkgId, $pkgName) {
     }
     INFO "Yukleniyor: $pkgName ..."
     winget install $pkgId --silent --accept-package-agreements --accept-source-agreements 2>&1 | Out-Null
-    # Hem 0 (basarili) hem de 0x8A15002B (zaten kurulu) kabul edilir
+    # 0 = basarili, -1978335189 (0x8A15002B) = zaten kurulu
     if ($LASTEXITCODE -eq 0 -or $LASTEXITCODE -eq -1978335189) {
         OK "$pkgName hazir."
         return $true
@@ -71,12 +85,37 @@ function WingetInstall($pkgId, $pkgName) {
 }
 
 # -----------------------------------------------------------------------------
+# KURULUM ON IZNI
+# -----------------------------------------------------------------------------
+Write-Host "  Su araclar kontrol edilecek ve eksikse kurulacak:" -ForegroundColor White
+Write-Host "    - Python 3.11" -ForegroundColor Gray
+Write-Host "    - Docker Desktop" -ForegroundColor Gray
+Write-Host "    - Minikube" -ForegroundColor Gray
+Write-Host "    - kubectl" -ForegroundColor Gray
+Write-Host "    - Helm" -ForegroundColor Gray
+Write-Host "    - Kubernetes cluster (Minikube)" -ForegroundColor Gray
+Write-Host "    - Prometheus, Pushgateway, KEDA (Helm)" -ForegroundColor Gray
+Write-Host ""
+Write-Host "  Zaten kurulu olanlar atlanacak." -ForegroundColor DarkGray
+Write-Host ""
+$izin = Read-Host "  Devam etmek istiyor musunuz? (e/h)"
+if ($izin -notmatch "^[eEyY]") {
+    Write-Host "  Iptal edildi." -ForegroundColor Yellow
+    exit 0
+}
+Write-Host ""
+
+# -----------------------------------------------------------------------------
 # [1/9] PYTHON
 # -----------------------------------------------------------------------------
 Step 1 "Python kontrol ediliyor..."
 
-if (-not (IsInstalled "python")) {
-    WARN "Python bulunamadi - winget ile otomatik yukleniyor..."
+# Once Windows Store stub'ini temizle
+DisableWindowsPythonStub
+RefreshPath
+
+if (-not (IsPythonReal)) {
+    WARN "Gercek Python bulunamadi - winget ile kuruluyor..."
 
     if (-not (EnsureWinget)) {
         ERR "Python bulunamadi ve winget de yok!"
@@ -87,16 +126,18 @@ if (-not (IsInstalled "python")) {
     }
 
     INFO "Python 3.11 yukleniyor (1-3 dk)..."
+    # InstallAllUsers=1 -> Program Files'a kurar, WindowsApps stub'undan once gelir
     winget install Python.Python.3.11 `
         --silent `
         --accept-package-agreements `
         --accept-source-agreements `
-        --override "/quiet InstallAllUsers=0 PrependPath=1 Include_pip=1" 2>&1 | Out-Null
+        --override "/quiet InstallAllUsers=1 PrependPath=1 Include_pip=1" 2>&1 | Out-Null
 
+    DisableWindowsPythonStub
     RefreshPath
     Start-Sleep -Seconds 3
 
-    if (-not (IsInstalled "python")) {
+    if (-not (IsPythonReal)) {
         ERR "Python yuklenemedi veya PATH'e eklenemedi."
         ERR "Lutfen python.org/downloads adresinden elle kurun."
         ERR "'Add Python to PATH' secenegini isaretleyin, sonra tekrar calistirin."
@@ -117,7 +158,10 @@ python -m pip install PyQt6 PyQt6-Qt6 PyQt6-sip matplotlib requests psutil `
 if ($LASTEXITCODE -eq 0) {
     OK "Python paketleri hazir."
 } else {
-    WARN "Bazi paketler yuklenemedi - uygulama baslatilirken hata olabilir."
+    WARN "Bazi paketler yuklenemedi - tekrar deneniyor..."
+    python -m pip install PyQt6 matplotlib requests psutil cryptography pyyaml --quiet 2>&1 | Out-Null
+    if ($LASTEXITCODE -eq 0) { OK "Temel Python paketleri hazir." }
+    else { WARN "Paket kurulumu basarisiz - uygulama hata verebilir." }
 }
 
 # -----------------------------------------------------------------------------
@@ -186,7 +230,7 @@ if (-not (IsInstalled "minikube")) {
 if (IsInstalled "minikube") {
     OK "Minikube hazir."
 } else {
-    ERR "Minikube yuklenemedi. Lutfen terminali yeniden acip tekrar deneyin."
+    ERR "Minikube yuklenemedi. Terminali yeniden acip tekrar deneyin."
     Read-Host "Enter ile cik"; exit 1
 }
 
@@ -236,9 +280,7 @@ try {
         $existing = $profiles.valid | Where-Object { $_.Name -like "autoscaleops*" } | Select-Object -First 1
         if ($existing) { $PROFILE_NAME = $existing.Name }
     }
-} catch {
-    # JSON parse hatasi - varsayilan isim kullan
-}
+} catch {}
 INFO "Profil: $PROFILE_NAME"
 
 minikube status -p $PROFILE_NAME 2>&1 | Out-Null
@@ -246,11 +288,9 @@ if ($LASTEXITCODE -eq 0) {
     OK "Cluster zaten calisiyor."
 } else {
     INFO "Cluster baslatiliyor (1-3 dk)..."
-
-    # Once 4 CPU / 6GB dene, basarisiz olursa 2 CPU / 4GB ile tekrar dene
     minikube start -p $PROFILE_NAME --driver=docker --cpus=4 --memory=6144 2>&1 | Select-Object -Last 5
     if ($LASTEXITCODE -ne 0) {
-        WARN "Yuksek kaynak ile baslatma basarisiz - dusuk kaynak ile tekrar deneniyor..."
+        WARN "Yuksek kaynak basarisiz - dusuk kaynak ile deneniyor..."
         minikube start -p $PROFILE_NAME --driver=docker --cpus=2 --memory=4096 2>&1 | Select-Object -Last 5
         if ($LASTEXITCODE -ne 0) {
             ERR "Cluster baslanamadi. Docker acik ve yeterli RAM var mi?"
@@ -261,11 +301,8 @@ if ($LASTEXITCODE -eq 0) {
 }
 
 kubectl create namespace $PROFILE_NAME --dry-run=client -o yaml 2>&1 | kubectl apply -f - 2>&1 | Out-Null
-if ($LASTEXITCODE -eq 0) {
-    OK "Namespace hazir: $PROFILE_NAME"
-} else {
-    WARN "Namespace olusturulamadi - devam ediliyor."
-}
+if ($LASTEXITCODE -eq 0) { OK "Namespace hazir: $PROFILE_NAME" }
+else { WARN "Namespace olusturulamadi - devam ediliyor." }
 
 # -----------------------------------------------------------------------------
 # [6/9] PROMETHEUS + PUSHGATEWAY
@@ -279,13 +316,12 @@ if ($LASTEXITCODE -eq 0) {
     INFO "Prometheus repo ekleniyor..."
     helm repo add prometheus-community https://prometheus-community.github.io/helm-charts 2>&1 | Out-Null
     helm repo update 2>&1 | Out-Null
-
     INFO "Prometheus kuruluyor (3-5 dk)..."
     helm upgrade --install prometheus prometheus-community/kube-prometheus-stack `
         --namespace monitoring --create-namespace `
         --set grafana.enabled=false `
         --set alertmanager.enabled=false `
-        --wait --timeout 5m 2>&1 | Select-Object -Last 5
+        --wait --timeout 5m 2>&1 | Select-Object -Last 3
     if ($LASTEXITCODE -eq 0) { OK "Prometheus kuruldu." }
     else { WARN "Prometheus kurulamadi - dashboard metrikleri calismayabilir." }
 }
@@ -297,7 +333,7 @@ if ($LASTEXITCODE -eq 0) {
     INFO "Pushgateway kuruluyor..."
     helm upgrade --install pushgateway prometheus-community/prometheus-pushgateway `
         --namespace monitoring --create-namespace `
-        --wait --timeout 2m 2>&1 | Select-Object -Last 3
+        --wait --timeout 3m 2>&1 | Select-Object -Last 3
     if ($LASTEXITCODE -eq 0) { OK "Pushgateway kuruldu." }
     else { WARN "Pushgateway kurulamadi." }
 }
@@ -314,7 +350,6 @@ if ($LASTEXITCODE -eq 0) {
     INFO "KEDA repo ekleniyor..."
     helm repo add kedacore https://kedacore.github.io/charts 2>&1 | Out-Null
     helm repo update 2>&1 | Out-Null
-
     INFO "KEDA kuruluyor..."
     helm upgrade --install keda kedacore/keda `
         --namespace keda --create-namespace `
@@ -330,15 +365,16 @@ Step 8 "AutoScaleOps CLI kontrol ediliyor..."
 
 Set-Location $SCRIPT_DIR
 
-autoscaleops --version 2>&1 | Out-Null
-if ($LASTEXITCODE -eq 0) {
+# Get-Command ile dogru kontrol (LASTEXITCODE yerine - CommandNotFoundException $LASTEXITCODE'u sifirlamaz)
+$cliExists = Get-Command autoscaleops -ErrorAction SilentlyContinue
+if ($cliExists) {
     OK "AutoScaleOps CLI zaten hazir."
 } else {
     if (Test-Path (Join-Path $SCRIPT_DIR "pyproject.toml")) {
         INFO "AutoScaleOps CLI yukleniyor..."
         python -m pip install -e . --quiet 2>&1 | Out-Null
-        autoscaleops --version 2>&1 | Out-Null
-        if ($LASTEXITCODE -eq 0) { OK "CLI yuklendi." }
+        $cliExists = Get-Command autoscaleops -ErrorAction SilentlyContinue
+        if ($cliExists) { OK "CLI yuklendi." }
         else { WARN "CLI yuklenemedi - uygulama yine de calisacak." }
     } else {
         WARN "pyproject.toml bulunamadi - CLI atlandi."
@@ -354,6 +390,12 @@ $appPath = Join-Path $SCRIPT_DIR "autoscaleops_app.py"
 if (-not (Test-Path $appPath)) {
     ERR "autoscaleops_app.py bulunamadi: $appPath"
     ERR "Dosyanin dogru klasorde oldugundan emin olun."
+    Read-Host "Enter ile cik"; exit 1
+}
+
+if (-not (IsPythonReal)) {
+    ERR "Python hala bulunamadi - uygulama baslatilemiyor."
+    ERR "Terminali kapatip yeniden acin ve tekrar calistirin."
     Read-Host "Enter ile cik"; exit 1
 }
 
