@@ -85,25 +85,76 @@ function WingetInstall($pkgId, $pkgName) {
 }
 
 # -----------------------------------------------------------------------------
-# KURULUM DURUMU KONTROL — setup_complete.json varsa direkt basla
+# KURULUM DURUMU KONTROL — setup_complete.json varsa saglik kontrolu yap
 # -----------------------------------------------------------------------------
-$setupFile   = "$env:USERPROFILE\.autoscaleops\setup_complete.json"
-$appPath     = Join-Path $SCRIPT_DIR "autoscaleops_app.py"
+$setupFile = "$env:USERPROFILE\.autoscaleops\setup_complete.json"
+$appPath   = Join-Path $SCRIPT_DIR "autoscaleops_app.py"
+
+function QuickHealthCheck {
+    Write-Host "  Sistem saglik kontrolu yapiliyor..." -ForegroundColor Cyan
+
+    # 1. Python gercekten calisıyor mu?
+    if (-not (IsPythonReal)) {
+        WARN "Python saglik kontrolu basarisiz."
+        return $false
+    }
+
+    # 2. Docker calisiyor mu?
+    docker info 2>&1 | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        WARN "Docker calismıyor."
+        return $false
+    }
+
+    # 3. Minikube 'autoscaleops' profili var ve calisiyor mu?
+    minikube status -p autoscaleops 2>&1 | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        WARN "Minikube cluster calismıyor."
+        return $false
+    }
+
+    # 4. Prometheus kurulu mu?
+    helm status prometheus -n monitoring 2>&1 | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        WARN "Prometheus kurulu degil."
+        return $false
+    }
+
+    OK "Tum sistemler saglikli."
+    return $true
+}
 
 if (Test-Path $setupFile) {
-    Write-Host "  Kurulum mevcut, uygulama baslatiliyor..." -ForegroundColor Green
     Write-Host ""
-    if (-not (Test-Path $appPath)) {
-        ERR "autoscaleops_app.py bulunamadi: $appPath"
-        Read-Host "Enter ile cik"; exit 1
+    Write-Host "  Onceki kurulum bulundu — kontrol ediliyor..." -ForegroundColor Cyan
+
+    if (QuickHealthCheck) {
+        # Her sey sagliklı — direkt uygulamayi ac
+        Write-Host ""
+        Write-Host "  =============================================" -ForegroundColor Cyan
+        Write-Host "   Sistemler hazir! Uygulama aciliyor...       " -ForegroundColor Green
+        Write-Host "  =============================================" -ForegroundColor Cyan
+        Write-Host ""
+        if (-not (Test-Path $appPath)) {
+            ERR "autoscaleops_app.py bulunamadi: $appPath"
+            Read-Host "Enter ile cik"; exit 1
+        }
+        Set-Location $SCRIPT_DIR
+        python autoscaleops_app.py
+        if ($LASTEXITCODE -ne 0) {
+            ERR "Uygulama hatayla kapandi. Yukari kaydiriniz."
+            Read-Host "Enter ile cik"
+        }
+        exit 0
+    } else {
+        # Eksik/bozuk kurulum tespit edildi — tam kurulum yeniden calisacak
+        Write-Host ""
+        WARN "Eksik veya bozuk kurulum tespit edildi."
+        WARN "Tam kurulum yeniden baslatiliyor..."
+        Write-Host ""
+        # Bozuk setup_complete.json'i sil ki kurulum tamamlaninca yeniden yazilsin
+        Remove-Item $setupFile -ErrorAction SilentlyContinue
     }
-    Set-Location $SCRIPT_DIR
-    python autoscaleops_app.py
-    if ($LASTEXITCODE -ne 0) {
-        ERR "Uygulama hatayla kapandi. Yukari kaydiriniz."
-        Read-Host "Enter ile cik"
-    }
-    exit 0
 }
 
 # -----------------------------------------------------------------------------
