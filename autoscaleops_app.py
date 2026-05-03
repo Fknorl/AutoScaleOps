@@ -7711,8 +7711,8 @@ class MainWindow(QMainWindow):
             self._hw_timer.start(30000)
         self._hw_thread.started.connect(_start_hw_timer)
         self._hw_thread.start()
-        # Immediate first collection — 3-arg form routes the call to hw_thread's event loop
-        QTimer.singleShot(2000, self._hw_monitor, self._hw_monitor.collect)
+        # Immediate first collection
+        QTimer.singleShot(2000, self._hw_monitor.collect)
 
         # Metrics poller
         self._metrics_thread = QThread(self)
@@ -7725,7 +7725,7 @@ class MainWindow(QMainWindow):
             self._metrics_poll_timer.start(5000)
         self._metrics_thread.started.connect(_start_metrics_timer)
         self._metrics_thread.start()
-        QTimer.singleShot(3000, self._metrics_poller, self._metrics_poller.poll)
+        QTimer.singleShot(3000, self._metrics_poller.poll)
 
         # Service watcher
         self._svc_thread = QThread(self)
@@ -7738,7 +7738,7 @@ class MainWindow(QMainWindow):
             self._svc_timer.start(10000)
         self._svc_thread.started.connect(_start_svc_timer)
         self._svc_thread.start()
-        QTimer.singleShot(5000, self._svc_watcher, self._svc_watcher.check)
+        QTimer.singleShot(5000, self._svc_watcher.check)
 
         # Activity refresh timer
         self._activity_timer = QTimer()
