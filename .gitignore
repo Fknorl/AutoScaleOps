@@ -46,5 +46,9 @@ spike_results*.csv
 build/
 dist/
 
-# Claude iç dosyaları
-.claude/
+# Claude ic dosyalari (ayarlar gizli kalsin, komutlar paylasim)
+.claude/settings.local.json
+.claude/settings.json
+.claude/worktrees/
+.claude/plans/
+# .claude/commands/ TAKIP EDILIR (ajan komutlari)

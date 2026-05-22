@@ -980,8 +980,12 @@ class AppDatabase:
             return [dict(r) for r in cur.fetchall()]
 
     def update_user(self, user_id: int, **kwargs):
+        # Whitelist: sadece izin verilen alanlar guncellenebilir (SQL injection onlemi)
+        _ALLOWED_USER_FIELDS = {"username", "email", "avatar", "theme", "language", "notifications"}
         with self._lock:
             for k, v in kwargs.items():
+                if k not in _ALLOWED_USER_FIELDS:
+                    raise ValueError(f"update_user: izin verilmeyen alan: {k!r}")
                 self.conn.execute(f"UPDATE users SET {k}=? WHERE id=?", (v, user_id))
             self.conn.commit()
 

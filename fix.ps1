@@ -90,45 +90,76 @@ function WingetInstall($pkgId, $pkgName) {
 $setupFile = "$env:USERPROFILE\.autoscaleops\setup_complete.json"
 $appPath   = Join-Path $SCRIPT_DIR "autoscaleops_app.py"
 
+function StartDockerIfClosed {
+    # Docker kurulu ama kapali mi? Sadece baslatmaya calis, kurulum yapmadan.
+    $dockerExePaths = @(
+        "C:\Program Files\Docker\Docker\Docker Desktop.exe",
+        "$env:LOCALAPPDATA\Docker\Docker Desktop.exe"
+    )
+    $dockerExe = $dockerExePaths | Where-Object { Test-Path $_ } | Select-Object -First 1
+    if (-not $dockerExe) { return $false }  # Docker hic kurulu degil
+
+    INFO "Docker Desktop baslatiliyor..."
+    Start-Process $dockerExe
+    $waited = 0
+    while ($waited -lt 60) {
+        Start-Sleep -Seconds 5; $waited += 5
+        docker info 2>&1 | Out-Null
+        if ($LASTEXITCODE -eq 0) { OK "Docker hazir."; return $true }
+        INFO "Docker bekleniyor: ${waited}s..."
+    }
+    return $false
+}
+
 function QuickHealthCheck {
     Write-Host "  Sistem saglik kontrolu yapiliyor..." -ForegroundColor Cyan
 
     # 1. Python gercekten calisiyor mu?
     if (-not (IsPythonReal)) {
-        WARN "Python saglik kontrolu basarisiz."
-        return $false
+        WARN "Python bulunamadi - tam kurulum gerekli."
+        return "REINSTALL"
     }
 
-    # 2. Docker calisiyor mu?
+    # 2. Docker calisiyor mu? (Sadece kapali ise otomatik baslat, kurulum yapma)
     docker info 2>&1 | Out-Null
     if ($LASTEXITCODE -ne 0) {
-        WARN "Docker calismiyor."
-        return $false
+        WARN "Docker calismiyor - baslatiliyor..."
+        if (-not (StartDockerIfClosed)) {
+            WARN "Docker baslanamadi - tam kurulum gerekli."
+            return "REINSTALL"
+        }
     }
 
     # 3. Minikube 'autoscaleops' profili var ve calisiyor mu?
     minikube status -p autoscaleops 2>&1 | Out-Null
     if ($LASTEXITCODE -ne 0) {
-        WARN "Minikube cluster calismiyor."
-        return $false
+        INFO "Minikube cluster baslatiliyor..."
+        minikube start -p autoscaleops --driver=docker 2>&1 | Select-Object -Last 3
+        if ($LASTEXITCODE -ne 0) {
+            WARN "Cluster baslanamadi - tam kurulum gerekli."
+            return "REINSTALL"
+        }
+        OK "Cluster hazir."
     }
 
-    # 4. Prometheus kurulu mu?
+    # 4. Prometheus kurulu mu? (Kurulu degilse tam kurulum, kapali degilse devam)
     helm status prometheus -n monitoring 2>&1 | Out-Null
     if ($LASTEXITCODE -ne 0) {
-        WARN "Prometheus kurulu degil."
-        return $false
+        WARN "Prometheus kurulu degil - tam kurulum gerekli."
+        return "REINSTALL"
     }
 
     OK "Tum sistemler saglikli."
-    return $true
+    return "OK"
 }
 
 if (Test-Path $setupFile) {
     Write-Host ""
     Write-Host "  Onceki kurulum bulundu - kontrol ediliyor..." -ForegroundColor Cyan
 
-    if (QuickHealthCheck) {
+    $healthResult = QuickHealthCheck
+
+    if ($healthResult -eq "OK") {
         # Her sey saglikli - direkt uygulamayi ac
         Write-Host ""
         Write-Host "  =============================================" -ForegroundColor Cyan
@@ -147,12 +178,12 @@ if (Test-Path $setupFile) {
         }
         exit 0
     } else {
-        # Eksik/bozuk kurulum tespit edildi - tam kurulum yeniden calisacak
+        # Eksik/bozuk kurulum - tam kurulum gerekiyor
         Write-Host ""
         WARN "Eksik veya bozuk kurulum tespit edildi."
         WARN "Tam kurulum yeniden baslatiliyor..."
         Write-Host ""
-        # Bozuk setup_complete.json'i sil ki kurulum tamamlaninca yeniden yazilsin
+        # setup_complete.json'i sil ki kurulum bitince yeniden yazilsin
         Remove-Item $setupFile -ErrorAction SilentlyContinue
     }
 }
