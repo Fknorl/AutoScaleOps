@@ -72,6 +72,64 @@ NGROK_EXE = NGROK_DIR / "ngrok.exe"
 NGROK_URL = "https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-windows-amd64.zip"
 SETUP_COMPLETE_PATH = APP_DIR / "setup_complete.json"
 
+# ─────────────────────────────────────────────────────────────────────────────
+#  DILLER / LANGUAGE  (TR default, EN optional)
+# ─────────────────────────────────────────────────────────────────────────────
+_APP_LANG: str = "tr"   # "tr" veya "en" — DB yüklendikten sonra güncellenir
+
+_STRINGS: dict[str, dict[str, str]] = {
+    # Nav sidebar
+    "nav.home":          {"tr": "Ana Sayfa",    "en": "Home"},
+    "nav.dashboard":     {"tr": "Dashboard",    "en": "Dashboard"},
+    "nav.activity":      {"tr": "Aktivite",     "en": "Activity"},
+    "nav.troubleshoot":  {"tr": "Sorun Gider",  "en": "Troubleshoot"},
+    "nav.settings":      {"tr": "Ayarlar",      "en": "Settings"},
+    "nav.deploy":        {"tr": "Deploy",       "en": "Deploy"},
+    # Settings panel
+    "settings.title":           {"tr": "Ayarlar",                      "en": "Settings"},
+    "settings.preferences":     {"tr": "Tercihler",                    "en": "Preferences"},
+    "settings.startup":         {"tr": "Windows başlangıcında başlat", "en": "Launch on Windows startup"},
+    "settings.tray":            {"tr": "Kapatınca sistem tepsisine küçült", "en": "Minimize to tray on close"},
+    "settings.refresh":         {"tr": "Otomatik yenileme aralığı:",   "en": "Auto-refresh interval:"},
+    "settings.notif":           {"tr": "Ölçekleme olayları için bildirim gönder", "en": "Toast notifications for scale events"},
+    "settings.language":        {"tr": "Uygulama dili:",               "en": "App language:"},
+    "settings.lang_tr":         {"tr": "Türkçe",                       "en": "Turkish"},
+    "settings.lang_en":         {"tr": "İngilizce",                    "en": "English"},
+    "settings.about":           {"tr": "Hakkında",                     "en": "About"},
+    "settings.docs":            {"tr": "Dokümantasyon",                "en": "Documentation"},
+    "settings.open_folder":     {"tr": "Uygulama Klasörünü Aç",       "en": "Open App Folder"},
+    "settings.check_updates":   {"tr": "Güncellemeleri Kontrol Et",    "en": "Check for Updates"},
+    "settings.restart_notice":  {
+        "tr": "Dil değişikliği kaydedildi.\nTam etkisi için uygulamayı yeniden başlatın.",
+        "en": "Language preference saved.\nRestart the app to apply fully."
+    },
+    # Troubleshooter
+    "troubleshoot.title":         {"tr": "Sorun Giderici",   "en": "Troubleshooter"},
+    "troubleshoot.run_diag":      {"tr": "🔍  Tam Tanı Çalıştır",  "en": "🔍  Run Full Diagnostics"},
+    "troubleshoot.export":        {"tr": "📄  Rapor Aktar",         "en": "📄  Export Report"},
+    "troubleshoot.running":       {"tr": "⏳  Çalıştırılıyor...",   "en": "⏳  Running..."},
+    "troubleshoot.auto_fix":      {"tr": "Otomatik Düzelt",          "en": "Auto Fix"},
+    "troubleshoot.no_results":    {"tr": "Tanı sonucu bulunamadı.",  "en": "No diagnostic results found."},
+    # Common UI
+    "btn.save":     {"tr": "Kaydet",   "en": "Save"},
+    "btn.cancel":   {"tr": "İptal",    "en": "Cancel"},
+    "btn.close":    {"tr": "Kapat",    "en": "Close"},
+    "btn.confirm":  {"tr": "Onayla",   "en": "Confirm"},
+    "lbl.loading":  {"tr": "Yükleniyor...", "en": "Loading..."},
+    "lbl.error":    {"tr": "Hata",     "en": "Error"},
+    "lbl.success":  {"tr": "Başarılı", "en": "Success"},
+}
+
+
+def t(key: str) -> str:
+    """Return the translated string for *key* in the current app language.
+    Falls back to the key itself if not found."""
+    entry = _STRINGS.get(key)
+    if entry is None:
+        return key
+    return entry.get(_APP_LANG) or entry.get("tr") or key
+
+
 # Color palette — Liquid Glass / Midnight Aurora
 C_BG       = "#05050F"   # Liquid void — near-black with blue depth
 C_SURFACE  = "#0C0C1E"   # Frosted glass panel
@@ -4178,6 +4236,7 @@ class SetupWizard(QWidget):
 class HomePanel(QWidget):
     # Kept for backward-compat with MainWindow signal connections
     request_cluster_action = pyqtSignal(str)
+    navigate_to = pyqtSignal(int)   # panel index'e git (5 = Deploy)
 
     def __init__(self, db, ops, parent=None):
         super().__init__(parent)
@@ -4505,6 +4564,68 @@ class HomePanel(QWidget):
 
         self._status_card.setVisible(False)
         lay.addWidget(self._status_card)
+
+        # ── DEPLOY KISAYOLU KARTI ─────────────────────────────────────────
+        lay.addSpacing(16)
+        deploy_card = QFrame()
+        deploy_card.setCursor(Qt.CursorShape.PointingHandCursor)
+        deploy_card.setStyleSheet(f"""
+            QFrame {{
+                background: {C_SURFACE2};
+                border: 1px solid rgba(99,102,241,0.25);
+                border-radius: 12px;
+            }}
+            QFrame:hover {{
+                border: 1px solid rgba(99,102,241,0.55);
+                background: rgba(99,102,241,0.07);
+            }}
+        """)
+        dc_lay = QHBoxLayout(deploy_card)
+        dc_lay.setContentsMargins(20, 14, 16, 14)
+        dc_lay.setSpacing(14)
+
+        icon_lbl = QLabel("△")
+        icon_lbl.setFont(QFont("Segoe UI", 18))
+        icon_lbl.setStyleSheet(f"color:{C_ACCENT}; background:transparent; border:none;")
+        icon_lbl.setFixedWidth(28)
+
+        text_col = QVBoxLayout()
+        text_col.setSpacing(3)
+        title_d = QLabel("Deploy Yönetimi")
+        title_d.setFont(QFont("Segoe UI", 12, QFont.Weight.Bold))
+        title_d.setStyleSheet(f"color:{C_TEXT}; background:transparent; border:none;")
+        desc_d = QLabel("Projenizi yayınlamak için proje bu bölümden seçilip deploy edilir.")
+        desc_d.setFont(QFont("Segoe UI", 10))
+        desc_d.setStyleSheet(f"color:{C_TEXT_DIM}; background:transparent; border:none;")
+        text_col.addWidget(title_d)
+        text_col.addWidget(desc_d)
+
+        btn_deploy_go = QPushButton("Deploy →")
+        btn_deploy_go.setFixedWidth(90)
+        btn_deploy_go.setFixedHeight(32)
+        btn_deploy_go.setStyleSheet(f"""
+            QPushButton {{
+                background: rgba(99,102,241,0.15);
+                color: {C_ACCENT};
+                border: 1px solid rgba(99,102,241,0.35);
+                border-radius: 8px;
+                font-size: 12px;
+                font-weight: 600;
+            }}
+            QPushButton:hover {{
+                background: rgba(99,102,241,0.30);
+            }}
+        """)
+        btn_deploy_go.clicked.connect(lambda: self.navigate_to.emit(5))
+
+        dc_lay.addWidget(icon_lbl)
+        dc_lay.addLayout(text_col, 1)
+        dc_lay.addWidget(btn_deploy_go)
+
+        # Kartın tamamına tıklayınca da git
+        deploy_card.mousePressEvent = lambda e: self.navigate_to.emit(5)
+
+        lay.addWidget(deploy_card)
         lay.addStretch()
 
         scroll.setWidget(inner)
@@ -5462,219 +5583,462 @@ class ActivityLogPanel(QWidget):
 #  PANEL 7 — TROUBLESHOOTER
 # ─────────────────────────────────────────────
 class TroubleshooterPanel(QWidget):
+    # signal to update diag list from worker thread
+    _diag_ready = pyqtSignal(list)
+
+    # ── issue definitions: (category, emoji, title, description, fix_action or None)
+    _ISSUES = [
+        # --- Kurulum ---
+        ("🔧 Kurulum", "🐍",
+         "Python stub (Microsoft Store) aktif",
+         "python komutunu calistirinca Microsoft Store aciliyorsa App Execution Alias engelleniyor. "
+         "Ayarlar > Uygulamalar > Uygulama yurutme takma adlari > python ve python3 kapali.",
+         "disable_store_alias"),
+        ("🔧 Kurulum", "🐳",
+         "Docker Desktop kapali",
+         "Docker Desktop baslatilmamis veya hata vermis. Minikube'un calisabilmesi icin Docker "
+         "Desktop acik olmali. Asagida 'Otomatik Duzelt' ile Docker'i baslatmayi deneyin.",
+         "start_docker"),
+        ("🔧 Kurulum", "📦",
+         "Python paketleri eksik",
+         "PyQt6, kubernetes, statsmodels vb. paketler kurulu degil. "
+         "requirements.txt yoksa autoscaleops_app.py'nin icinde import listesi mevcut.",
+         "install_packages"),
+        ("🔧 Kurulum", "🛠️",
+         "Minikube veya kubectl bulunamadi",
+         "PATH'te minikube veya kubectl yok. fix.ps1 calistirarak gerekli araclari otomatik indir "
+         "ve kur. Gereksinim: Windows 10/11, 8 GB RAM, 30 GB bos disk.",
+         "run_fixps1"),
+
+        # --- Cluster ---
+        ("☸️ Cluster", "💾",
+         "Yetersiz kaynak (RAM / disk)",
+         "Minikube en az 6 GB RAM ve 20 GB bos disk gerektirir. Gorevin Yoneticisi'nde bellek "
+         "kullanimini kontrol edin; gereksiz programlari kapatin.",
+         None),
+        ("☸️ Cluster", "🏷️",
+         "Namespace eksik",
+         "'autoscaleops' veya 'monitoring' namespace bulunamadi. Cluster yeniden olusturulurken "
+         "namespace'ler silinmis olabilir.",
+         "create_namespaces"),
+        ("☸️ Cluster", "🔌",
+         "Port forward baglantilar kesildi",
+         "Port forward islemleri oldurulmus ya da zaman asimina ugramis. Uygulama ile cluster "
+         "arasindaki 8080/9090 portlari yeniden yonlendir.",
+         "restart_pf"),
+        ("☸️ Cluster", "🔖",
+         "Eski hash tabanli Minikube profili",
+         "Onceki surumde profil adi 'minikube-XXXX' gibi hash ile olusturuluyordu. Simdiki "
+         "surumde profil adi sabit: 'autoscaleops'. Eski profili silin.",
+         "delete_old_profiles"),
+
+        # --- Uygulama ---
+        ("📊 Uygulama", "📉",
+         "Trafik 0 RPS gosteriyor",
+         "Prometheus henuz metrikleri toplamaya baslamadi. Scrape yapilandirmasi uygulanmamis "
+         "olabilir. 'Otomatik Duzelt' ile Prometheus scrape config yeniden uygulayabilirsiniz.",
+         "apply_scrape"),
+        ("📊 Uygulama", "🖥️",
+         "Dashboard acilmiyor",
+         "Streamlit dashboard sureci durmus. Loglari kontrol etmek icin Activity Log paneline "
+         "bakin. Dashboard yeniden baslatmak icin 'Otomatik Duzelt' kullanin.",
+         "start_dashboard"),
+        ("📊 Uygulama", "📡",
+         "Prometheus metrikleri gelmiyor",
+         "Prometheus'un 9090 portu erisim vermiyor. Port forward yuklu degilse "
+         "Prometheus sorgulari bos donerken gorulur.",
+         "fwd_prometheus"),
+        ("📊 Uygulama", "⚖️",
+         "KEDA pod olceklendirmiyor",
+         "ScaledObject kaynak eksik ya da Prometheus trigger dogru ayarlanmamis. "
+         "kubectl get scaledobject -n autoscaleops calistirilarak kaynak varligini dogrulayin.",
+         "check_keda"),
+
+        # --- Performans ---
+        ("⚡ Performans", "❄️",
+         "Ilk istek cok yavas (cold-start)",
+         "Minikube ilk basladiginda JVM / Python worker'lari henuz hazir degil. "
+         "1-2 dakika bekleyin ya da is yuku gondermeye baslayip ilk sonuclari goz ardi edin.",
+         None),
+        ("⚡ Performans", "⏱️",
+         "Yuksek gecikme (>200 ms p95)",
+         "CPU talebini azaltin veya Minikube kaynak limitini artirin: "
+         "minikube config set memory 8192 && minikube config set cpus 4. "
+         "ARIMA tahmin ufkunu kisaltarak erken olceklendirme yapilabilir.",
+         None),
+        ("⚡ Performans", "🔄",
+         "Sifirdan basla (tam yeniden kurulum)",
+         "Hic bir yontem calismiyorsa clusteri tamamen silip yeniden kurun. "
+         "Bu islem 5-10 dakika surer, tum veriler silinir.",
+         "full_reinstall"),
+    ]
+
     def __init__(self, db, ops, parent=None):
         super().__init__(parent)
         self.db = db
         self.ops = ops
+        self._diag_results = []
+        self._diag_ready.connect(self._populate_diag_results)
+
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QFrame.Shape.NoFrame)
         content = QWidget()
         lay = QVBoxLayout(content)
         lay.setContentsMargins(24, 24, 24, 24)
-        lay.setSpacing(16)
+        lay.setSpacing(20)
 
-        # Run diagnostics
-        diag_header = QHBoxLayout()
-        btn_run_diag = QPushButton("Run Diagnostics")
-        btn_run_diag.setObjectName("btn_primary")
-        btn_run_diag.setFixedHeight(40)
-        btn_run_diag.clicked.connect(self._run_diagnostics)
-        btn_export_diag = QPushButton("Export Report")
-        btn_export_diag.clicked.connect(self._export_report)
-        diag_header.addWidget(btn_run_diag)
-        diag_header.addWidget(btn_export_diag)
-        diag_header.addStretch()
-        lay.addLayout(diag_header)
+        # ── Baslik
+        hdr = QLabel("Sorun Giderici")
+        hdr.setStyleSheet(f"color:{C_TEXT}; font-size:20px; font-weight:bold;")
+        sub = QLabel("Kendi kendinize sorunlari tespit edin ve otomatik duzeltmeleri uygulayin.")
+        sub.setStyleSheet(f"color:{C_TEXT_DIM}; font-size:13px;")
+        lay.addWidget(hdr)
+        lay.addWidget(sub)
 
-        # Diagnostics list
-        self._diag_list = QVBoxLayout()
+        # ── Hizli tani butonu
+        btn_row = QHBoxLayout()
+        self._btn_run_diag = QPushButton("🔍  Tam Tani Calistir")
+        self._btn_run_diag.setObjectName("btn_primary")
+        self._btn_run_diag.setFixedHeight(40)
+        self._btn_run_diag.clicked.connect(self._run_diagnostics)
+        btn_export = QPushButton("📄  Rapor Aktar")
+        btn_export.setFixedHeight(40)
+        btn_export.clicked.connect(self._export_report)
+        btn_row.addWidget(self._btn_run_diag)
+        btn_row.addWidget(btn_export)
+        btn_row.addStretch()
+        lay.addLayout(btn_row)
+
+        # ── Tani sonuclari alani
+        self._diag_card = Card("Tani Sonuclari")
+        self._diag_list = self._diag_card.body()
         self._diag_list.setSpacing(6)
-        lay.addLayout(self._diag_list)
+        _placeholder = QLabel("Henuz tani calistirilmadi. 'Tam Tani Calistir' butonuna basin.")
+        _placeholder.setStyleSheet(f"color:{C_TEXT_DIM}; font-size:12px;")
+        self._diag_list.addWidget(_placeholder)
+        self._diag_placeholder = _placeholder
+        lay.addWidget(self._diag_card)
 
-        # Common Issues accordion
-        issues_card = Card("Common Issues & Solutions")
-        ib = issues_card.body()
-        common_issues = [
-            ("Traffic shows as 0 RPS",
-             "The app metrics may not be scraped by Prometheus yet.",
-             "apply_scrape"),
-            ("Dashboard not loading",
-             "The Streamlit dashboard process may have stopped.",
-             "start_dashboard"),
-            ("Cluster will not start",
-             "Ensure Docker Desktop is running and you have enough RAM (6GB+) and disk (20GB+).",
-             None),
-            ("Port forwards died",
-             "Port forward processes were killed. Restart them.",
-             "restart_pf"),
-            ("Pods not scaling",
-             "Check that KEDA is installed and the ScaledObject exists. Apply scrape config to ensure Prometheus is collecting metrics.",
-             None),
-        ]
-        for title, desc, fix_action in common_issues:
-            ib.addWidget(self._make_issue_row(title, desc, fix_action))
-        lay.addWidget(issues_card)
+        # ── Kategorilere gore bilinen sorunlar
+        categories = {}
+        for issue in self._ISSUES:
+            cat = issue[0]
+            categories.setdefault(cat, []).append(issue)
+
+        for cat_name, issues in categories.items():
+            cat_card = Card(cat_name)
+            cb = cat_card.body()
+            cb.setSpacing(8)
+            for issue in issues:
+                cb.addWidget(self._make_issue_row(issue))
+            lay.addWidget(cat_card)
+
         lay.addStretch()
         scroll.setWidget(content)
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.addWidget(scroll)
-        self._diag_results = []
 
-    def _make_issue_row(self, title: str, desc: str, fix_action: str) -> QFrame:
+    # ── Sorun satiri olustur
+    def _make_issue_row(self, issue: tuple) -> QFrame:
+        _cat, emoji, title, desc, fix_action = issue
         f = QFrame()
-        f.setStyleSheet(f"background:{C_SURFACE}; border:1px solid {C_BORDER}; border-radius:8px;")
+        f.setStyleSheet(
+            f"QFrame {{ background:{C_SURFACE2}; border:1px solid {C_BORDER}; "
+            f"border-radius:10px; }} "
+            f"QFrame:hover {{ border-color: rgba(99,102,241,0.45); }}"
+        )
         fl = QVBoxLayout(f)
-        fl.setContentsMargins(16, 10, 16, 10)
-        tl = QHBoxLayout()
+        fl.setContentsMargins(16, 12, 16, 12)
+        fl.setSpacing(6)
+
+        top = QHBoxLayout()
+        icon_lbl = QLabel(emoji)
+        icon_lbl.setStyleSheet("font-size:18px;")
+        icon_lbl.setFixedWidth(28)
         title_lbl = QLabel(title)
-        title_lbl.setStyleSheet(f"color:{C_TEXT}; font-weight:bold;")
-        tl.addWidget(title_lbl)
+        title_lbl.setStyleSheet(f"color:{C_TEXT}; font-weight:bold; font-size:13px;")
+        top.addWidget(icon_lbl)
+        top.addWidget(title_lbl)
+        top.addStretch()
+
         if fix_action:
-            fix_btn = QPushButton("Fix It")
+            fix_btn = QPushButton("Otomatik Duzelt")
             fix_btn.setObjectName("btn_warning")
-            fix_btn.setFixedWidth(70)
+            fix_btn.setFixedHeight(30)
+            fix_btn.setCursor(Qt.CursorShape.PointingHandCursor)
             fix_btn.clicked.connect(lambda checked, a=fix_action: self._do_fix(a))
-            tl.addStretch()
-            tl.addWidget(fix_btn)
-        fl.addLayout(tl)
+            top.addWidget(fix_btn)
+
+        fl.addLayout(top)
+
         desc_lbl = QLabel(desc)
         desc_lbl.setStyleSheet(f"color:{C_TEXT_DIM}; font-size:12px;")
         desc_lbl.setWordWrap(True)
         fl.addWidget(desc_lbl)
         return f
 
+    # ── Otomatik duzeltme aksiyonlari
     def _do_fix(self, action: str):
+        def _toast(msg: str):
+            QMessageBox.information(self, "Otomatik Duzelt", msg)
+
         if action == "apply_scrape":
             instance = self.ops.get_instance()
             if instance:
                 import threading
-                threading.Thread(target=lambda: self.ops.apply_scrape_config(instance["namespace"]), daemon=True).start()
+                threading.Thread(
+                    target=lambda: self.ops.apply_scrape_config(instance["namespace"]),
+                    daemon=True
+                ).start()
+                _toast("Prometheus scrape yapilandirmasi uygulanıyor...")
+            else:
+                _toast("Aktif cluster bulunamadi.")
+
         elif action == "start_dashboard":
             self.ops.start_dashboard()
+            _toast("Dashboard baslatiliyor...")
+
         elif action == "restart_pf":
             instance = self.ops.get_instance()
             if instance:
                 self.ops.start_port_forwards(instance["namespace"])
+                _toast("Port forward'lar yeniden baslatildi.")
+            else:
+                _toast("Aktif cluster bulunamadi.")
+
+        elif action == "start_docker":
+            import threading
+            def _start():
+                import subprocess, time
+                paths = [
+                    r"C:\Program Files\Docker\Docker\Docker Desktop.exe",
+                ]
+                import os
+                local = os.environ.get("LOCALAPPDATA", "")
+                if local:
+                    paths.append(os.path.join(local, "Docker", "Docker Desktop.exe"))
+                exe = next((p for p in paths if os.path.exists(p)), None)
+                if exe:
+                    subprocess.Popen([exe])
+            threading.Thread(target=_start, daemon=True).start()
+            _toast("Docker Desktop baslatiliyor. Hazir olmasini bekleyin (yaklasik 30 sn).")
+
+        elif action == "install_packages":
+            cmd = "pip install PyQt6 kubernetes statsmodels requests prometheus_client"
+            self._show_fix(cmd)
+
+        elif action == "run_fixps1":
+            self._show_fix("powershell -ExecutionPolicy Bypass -File fix.ps1")
+
+        elif action == "disable_store_alias":
+            _toast(
+                "Windows Ayarlari'ni acin:\n"
+                "Uygulamalar > Uygulamalar ve ozellikler > Uygulama yurutme takma adlari\n"
+                "'python.exe' ve 'python3.exe' satirlarini kapali konuma getirin."
+            )
+
+        elif action == "create_namespaces":
+            cmd = (
+                "kubectl create namespace autoscaleops --dry-run=client -o yaml | kubectl apply -f -\n"
+                "kubectl create namespace monitoring --dry-run=client -o yaml | kubectl apply -f -\n"
+                "kubectl create namespace keda --dry-run=client -o yaml | kubectl apply -f -"
+            )
+            self._show_fix(cmd)
+
+        elif action == "delete_old_profiles":
+            cmd = (
+                "# Eski profilleri listele\n"
+                "minikube profile list\n\n"
+                "# 'autoscaleops' dismindaki profilleri sil (profil adini degistirin)\n"
+                "minikube delete -p <eski_profil_adi>"
+            )
+            self._show_fix(cmd)
+
+        elif action == "fwd_prometheus":
+            cmd = "kubectl port-forward svc/prometheus-operated 9090:9090 -n monitoring"
+            self._show_fix(cmd)
+
+        elif action == "check_keda":
+            cmd = (
+                "kubectl get scaledobject -n autoscaleops\n"
+                "kubectl describe scaledobject autoscaleops-scaledobject -n autoscaleops\n"
+                "kubectl get pods -n keda"
+            )
+            self._show_fix(cmd)
+
+        elif action == "full_reinstall":
+            reply = QMessageBox.question(
+                self, "Sifirdan Basla",
+                "Bu islem clusteri tamamen silecek ve yeniden kuracak.\n"
+                "Tum veriler kaybolacak. Devam etmek istiyor musunuz?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            )
+            if reply == QMessageBox.StandardButton.Yes:
+                cmd = (
+                    "minikube delete -p autoscaleops\n"
+                    "powershell -ExecutionPolicy Bypass -File fix.ps1"
+                )
+                self._show_fix(cmd)
 
     def _run_diagnostics(self):
-        # Clear existing
+        # Clear and show loading
         while self._diag_list.count():
             item = self._diag_list.takeAt(0)
             if item.widget():
                 item.widget().deleteLater()
-        loading = QLabel("Running diagnostics...")
-        loading.setStyleSheet(f"color:{C_ACCENT};")
+        self._diag_placeholder = None
+        loading = QLabel("⏳  Tani calistiriliyor...")
+        loading.setStyleSheet(f"color:{C_ACCENT}; font-size:13px;")
         self._diag_list.addWidget(loading)
+        self._btn_run_diag.setEnabled(False)
+        self._btn_run_diag.setText("⏳  Calistiriliyor...")
 
         def do():
             results = self.ops.run_diagnostics()
-            self._diag_results = results
-            # Remove loading
-            while self._diag_list.count():
-                item = self._diag_list.takeAt(0)
-                if item.widget():
-                    item.widget().deleteLater()
-            for res in results:
-                widget = self._make_diag_row(res)
-                self._diag_list.addWidget(widget)
+            self._diag_ready.emit(results)
+
         import threading
         threading.Thread(target=do, daemon=True).start()
+
+    @pyqtSlot(list)
+    def _populate_diag_results(self, results: list):
+        self._diag_results = results
+        while self._diag_list.count():
+            item = self._diag_list.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        if results:
+            for res in results:
+                self._diag_list.addWidget(self._make_diag_row(res))
+        else:
+            no_res = QLabel("Tani tamamlandi ama sonuc donmedi.")
+            no_res.setStyleSheet(f"color:{C_TEXT_DIM};")
+            self._diag_list.addWidget(no_res)
+        self._btn_run_diag.setEnabled(True)
+        self._btn_run_diag.setText("🔍  Tam Tani Calistir")
 
     def _make_diag_row(self, res: dict) -> QFrame:
         f = QFrame()
         status = res.get("status", "ok")
         colors = {"ok": C_GREEN, "warn": C_YELLOW, "error": C_RED}
         color = colors.get(status, C_TEXT)
-        f.setStyleSheet(f"background:{C_SURFACE}; border:1px solid {C_BORDER}; border-left:3px solid {color}; border-radius:8px;")
+        f.setStyleSheet(
+            f"background:{C_SURFACE2}; border:1px solid {C_BORDER}; "
+            f"border-left:3px solid {color}; border-radius:8px;"
+        )
         fl = QVBoxLayout(f)
         fl.setContentsMargins(16, 8, 16, 8)
         fl.setSpacing(4)
         top_row = QHBoxLayout()
-        icon = {"ok": "OK", "warn": "WARN", "error": "ERR"}.get(status, "?")
-        icon_lbl = QLabel(icon)
-        icon_lbl.setStyleSheet(f"color:{color}; font-weight:bold; font-size:11px; min-width:40px;")
+        badge = {"ok": "✅ TAMAM", "warn": "⚠️ UYARI", "error": "❌ HATA"}.get(status, "?")
+        badge_lbl = QLabel(badge)
+        badge_lbl.setStyleSheet(
+            f"color:{color}; font-weight:bold; font-size:11px; min-width:72px;"
+        )
         check_lbl = QLabel(res.get("check", ""))
-        check_lbl.setStyleSheet(f"color:{C_TEXT}; font-weight:bold;")
-        top_row.addWidget(icon_lbl)
+        check_lbl.setStyleSheet(f"color:{C_TEXT}; font-weight:bold; font-size:13px;")
+        top_row.addWidget(badge_lbl)
         top_row.addWidget(check_lbl)
         top_row.addStretch()
         if status in ("warn", "error") and res.get("fix"):
-            fix_btn = QPushButton("Fix It")
+            fix_btn = QPushButton("Duzelt")
             fix_btn.setObjectName("btn_warning")
-            fix_btn.setFixedWidth(60)
+            fix_btn.setFixedHeight(28)
             fix_str = res["fix"]
             fix_btn.clicked.connect(lambda checked, cmd=fix_str: self._show_fix(cmd))
             top_row.addWidget(fix_btn)
         fl.addLayout(top_row)
         msg_lbl = QLabel(res.get("message", ""))
         msg_lbl.setStyleSheet(f"color:{C_TEXT_DIM}; font-size:12px;")
+        msg_lbl.setWordWrap(True)
         fl.addWidget(msg_lbl)
         return f
 
     def _show_fix(self, fix: str):
         dlg = QDialog(self)
-        dlg.setWindowTitle("Fix It")
-        dlg.setFixedSize(500, 300)
+        dlg.setWindowTitle("Komut Calistir")
+        dlg.setFixedSize(560, 320)
         dlg.setStyleSheet(STYLESHEET)
         lay = QVBoxLayout(dlg)
         lay.setContentsMargins(24, 24, 24, 24)
         lay.setSpacing(12)
-        lay.addWidget(QLabel("Suggested fix:"))
+        lbl = QLabel("Onerilern duzeltme komutu:")
+        lbl.setStyleSheet(f"color:{C_TEXT}; font-weight:bold;")
+        lay.addWidget(lbl)
         text = QTextEdit()
         text.setReadOnly(True)
         text.setFont(QFont("Consolas", 10))
         text.setPlainText(fix)
-        btn_run = QPushButton("Run This Command")
+        lay.addWidget(text)
+        btn_run = QPushButton("▶  Komutu Calistir")
         btn_run.setObjectName("btn_primary")
         btn_result = QLabel("")
+        btn_result.setStyleSheet(f"color:{C_TEXT_DIM}; font-size:11px;")
+        btn_result.setWordWrap(True)
         def run_fix():
+            btn_run.setEnabled(False)
+            btn_run.setText("⏳  Calistiriliyor...")
             ok, out = run_ps(fix, timeout=60)
-            btn_result.setText(f"{'OK' if ok else 'Error'}: {out[:200]}")
+            status_str = "✅ Tamam" if ok else "❌ Hata"
+            btn_result.setText(f"{status_str}: {out[:300]}")
+            btn_run.setEnabled(True)
+            btn_run.setText("▶  Komutu Calistir")
         btn_run.clicked.connect(run_fix)
-        lay.addWidget(text)
         lay.addWidget(btn_run)
         lay.addWidget(btn_result)
-        lay.addWidget(QDialogButtonBox(QDialogButtonBox.StandardButton.Close, accepted=dlg.accept, rejected=dlg.reject))
+        close_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        close_box.rejected.connect(dlg.reject)
+        lay.addWidget(close_box)
         dlg.exec()
 
     def _export_report(self):
-        path, _ = QFileDialog.getSaveFileName(self, "Export Diagnostics Report", "autoscaleops_diagnostics.txt", "Text Files (*.txt)")
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Tani Raporunu Aktar", "autoscaleops_tani.txt", "Text Files (*.txt)"
+        )
         if not path:
             return
         try:
             lines = [
-                f"AutoScaleOps Diagnostics Report",
-                f"Generated: {datetime.now().isoformat()}",
-                f"App Version: {APP_VERSION}",
+                "AutoScaleOps Tani Raporu",
+                f"Olusturulma: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+                f"Uygulama Surumu: {APP_VERSION}",
                 "=" * 60,
                 "",
             ]
             if self._diag_results:
-                lines.append("DIAGNOSTIC CHECKS:")
+                lines.append("TANI KONTROLLERI:")
                 for res in self._diag_results:
-                    lines.append(f"  [{res['status'].upper():5}] {res['check']}: {res['message']}")
+                    badge = {"ok": "TAMAM", "warn": "UYARI", "error": "HATA"}.get(
+                        res.get("status", ""), res.get("status", "").upper()
+                    )
+                    lines.append(f"  [{badge:5}] {res.get('check','')}: {res.get('message','')}")
                     if res.get("fix"):
-                        lines.append(f"         Fix: {res['fix']}")
+                        lines.append(f"         Duzeltme: {res['fix']}")
             else:
-                lines.append("No diagnostic results. Run diagnostics first.")
+                lines.append("Tani sonucu bulunamadi. Once 'Tam Tani Calistir' butonuna basin.")
             lines.append("")
-            lines.append("RECENT ACTIVITY:")
+            lines.append("SON AKTIVITELER:")
             logs = self.db.get_activity_log(limit=20)
             for entry in logs:
-                lines.append(f"  {entry.get('timestamp','')[:19]} [{entry.get('event_type','')}] {entry.get('description','')}")
+                lines.append(
+                    f"  {entry.get('timestamp','')[:19]} "
+                    f"[{entry.get('event_type','')}] {entry.get('description','')}"
+                )
             with open(path, "w", encoding="utf-8") as f:
                 f.write("\n".join(lines))
-            QMessageBox.information(self, "Export", f"Report saved to {path}")
+            QMessageBox.information(self, "Aktar", f"Rapor kaydedildi:\n{path}")
         except Exception as e:
-            QMessageBox.critical(self, "Export Error", str(e))
+            QMessageBox.critical(self, "Aktarma Hatasi", str(e))
 
 
 # ─────────────────────────────────────────────
 #  PANEL 8 — SETTINGS
 # ─────────────────────────────────────────────
 class SettingsPanel(QWidget):
+    language_changed = pyqtSignal(str)   # "tr" veya "en" yayınlar
+
     def __init__(self, db, ops, parent=None):
         super().__init__(parent)
         self.db = db
@@ -5687,16 +6051,22 @@ class SettingsPanel(QWidget):
         lay.setContentsMargins(24, 24, 24, 24)
         lay.setSpacing(16)
 
-        # Preferences
-        pref_card = Card("Preferences")
+        # ── Başlık
+        hdr = QLabel(t("settings.title"))
+        hdr.setStyleSheet(f"color:{C_TEXT}; font-size:20px; font-weight:bold;")
+        lay.addWidget(hdr)
+
+        # ── Tercihler kartı
+        pref_card = Card(t("settings.preferences"))
         pref_b = pref_card.body()
-        self._startup_chk = QCheckBox("Launch AutoScaleOps on Windows startup")
+        self._startup_chk = QCheckBox(t("settings.startup"))
         self._startup_chk.setChecked(ops.get_windows_startup())
         self._startup_chk.toggled.connect(lambda v: ops.set_windows_startup(v))
-        self._tray_chk = QCheckBox("Minimize to system tray on close")
+        self._tray_chk = QCheckBox(t("settings.tray"))
         self._tray_chk.setChecked(db.get_setting("minimize_to_tray", "true") == "true")
         self._tray_chk.toggled.connect(lambda v: db.set_setting("minimize_to_tray", str(v).lower()))
         refresh_row = QHBoxLayout()
+        self._refresh_lbl = QLabel(t("settings.refresh"))
         self._refresh_combo = QComboBox()
         self._refresh_combo.addItems(["5s", "10s", "30s", "60s"])
         saved_interval = db.get_setting("auto_refresh_interval", "5s")
@@ -5704,10 +6074,10 @@ class SettingsPanel(QWidget):
         if idx >= 0:
             self._refresh_combo.setCurrentIndex(idx)
         self._refresh_combo.currentTextChanged.connect(lambda v: db.set_setting("auto_refresh_interval", v))
-        refresh_row.addWidget(QLabel("Auto-refresh interval:"))
+        refresh_row.addWidget(self._refresh_lbl)
         refresh_row.addWidget(self._refresh_combo)
         refresh_row.addStretch()
-        self._notif_chk = QCheckBox("Enable Windows toast notifications for scale events")
+        self._notif_chk = QCheckBox(t("settings.notif"))
         self._notif_chk.setChecked(db.get_setting("notifications_enabled", "true") == "true")
         self._notif_chk.toggled.connect(lambda v: db.set_setting("notifications_enabled", str(v).lower()))
         pref_b.addWidget(self._startup_chk)
@@ -5716,8 +6086,32 @@ class SettingsPanel(QWidget):
         pref_b.addWidget(self._notif_chk)
         lay.addWidget(pref_card)
 
-        # About
-        about_card = Card("About")
+        # ── Dil / Language kartı
+        lang_card = Card(t("settings.language").rstrip(":"))
+        lb = lang_card.body()
+        lang_row = QHBoxLayout()
+        lang_lbl = QLabel(t("settings.language"))
+        lang_lbl.setStyleSheet(f"color:{C_TEXT};")
+        self._lang_combo = QComboBox()
+        self._lang_combo.addItem(t("settings.lang_tr"), "tr")
+        self._lang_combo.addItem(t("settings.lang_en"), "en")
+        saved_lang = db.get_setting("language", "tr")
+        li = self._lang_combo.findData(saved_lang)
+        if li >= 0:
+            self._lang_combo.setCurrentIndex(li)
+        self._lang_combo.currentIndexChanged.connect(self._on_lang_changed)
+        lang_row.addWidget(lang_lbl)
+        lang_row.addWidget(self._lang_combo)
+        lang_row.addStretch()
+        lb.addLayout(lang_row)
+        lang_note = QLabel("⚠  Tam etki için uygulamayı yeniden başlatın / Restart app for full effect.")
+        lang_note.setStyleSheet(f"color:{C_TEXT_DIM}; font-size:11px;")
+        lang_note.setWordWrap(True)
+        lb.addWidget(lang_note)
+        lay.addWidget(lang_card)
+
+        # ── Hakkında kartı
+        about_card = Card(t("settings.about"))
         ab = about_card.body()
         instance = ops.get_instance()
         inst_id = instance.get("instance_id", "N/A") if instance else "N/A"
@@ -5730,12 +6124,12 @@ class SettingsPanel(QWidget):
         self._about_lbl.setStyleSheet(f"color:{C_TEXT}; font-family:Consolas; font-size:12px;")
         self._about_lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
         about_btn_row = QHBoxLayout()
-        btn_docs = QPushButton("Documentation")
-        btn_docs.clicked.connect(lambda: webbrowser.open("https://github.com/autoscaleops/autoscaleops"))
-        btn_open_folder = QPushButton("Open App Folder")
+        btn_docs = QPushButton(t("settings.docs"))
+        btn_docs.clicked.connect(lambda: webbrowser.open("https://github.com/Fknorl/AutoScaleOps"))
+        btn_open_folder = QPushButton(t("settings.open_folder"))
         btn_open_folder.clicked.connect(lambda: run_ps(f"explorer {APP_DIR}"))
-        btn_check_updates = QPushButton("Check for Updates")
-        btn_check_updates.clicked.connect(lambda: webbrowser.open("https://github.com/autoscaleops/autoscaleops/releases"))
+        btn_check_updates = QPushButton(t("settings.check_updates"))
+        btn_check_updates.clicked.connect(lambda: webbrowser.open("https://github.com/Fknorl/AutoScaleOps/releases"))
         about_btn_row.addWidget(btn_docs)
         about_btn_row.addWidget(btn_open_folder)
         about_btn_row.addWidget(btn_check_updates)
@@ -5749,6 +6143,20 @@ class SettingsPanel(QWidget):
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.addWidget(scroll)
+
+    def _on_lang_changed(self, index: int):
+        global _APP_LANG
+        lang_code = self._lang_combo.itemData(index)
+        if not lang_code:
+            return
+        _APP_LANG = lang_code
+        self.db.set_setting("language", lang_code)
+        self.language_changed.emit(lang_code)
+        QMessageBox.information(
+            self,
+            t("settings.title"),
+            t("settings.restart_notice")
+        )
 
     def load_user(self):
         pass  # Profil kaldırıldı — no-op
@@ -7433,8 +7841,12 @@ class MainWindow(QMainWindow):
 
         # Connect home cluster buttons
         self._home_panel.request_cluster_action.connect(self._handle_cluster_action)
+        # Deploy kısayolu — HomePanel'den direkt Deploy paneline git
+        self._home_panel.navigate_to.connect(self._nav_select)
         # Connect deploy panel navigation
         self._deploy_panel.navigate_request.connect(self._handle_cluster_action)
+        # Dil değişikliği → nav butonlarını güncelle
+        self._settings_panel.language_changed.connect(self._apply_language)
 
         # Workers setup
         self._setup_workers()
@@ -7465,6 +7877,18 @@ class MainWindow(QMainWindow):
                 level="success",
                 auto_dismiss_ms=5000
             )
+
+    # ── Dil uygula ────────────────────────────
+    @pyqtSlot(str)
+    def _apply_language(self, lang_code: str):
+        """Dil değiştiğinde navigasyon butonlarını anında güncelle."""
+        nav_keys = [
+            "nav.home", "nav.dashboard", "nav.activity",
+            "nav.troubleshoot", "nav.settings", "nav.deploy",
+        ]
+        icons = ["⊙", "▦", "≡", "⚙", "◇", "△"]
+        for i, (btn, key, icon) in enumerate(zip(self._nav_buttons, nav_keys, icons)):
+            btn.setText(f"  {icon}   {t(key)}")
 
     # ── Sidebar ───────────────────────────────
     def _build_sidebar(self) -> QWidget:
@@ -7519,12 +7943,12 @@ class MainWindow(QMainWindow):
         # ── Nav items ───────────────────────────────────────────────────────
         # 0:Ana Sayfa  1:Dashboard  2:Aktivite  3:Sorun Gider  4:Ayarlar  5:Deploy
         nav_items = [
-            ("Ana Sayfa",   "⊙"),
-            ("Dashboard",   "▦"),
-            ("Aktivite",    "≡"),
-            ("Sorun Gider", "⚙"),
-            ("Ayarlar",     "◇"),
-            ("Deploy",      "△"),
+            (t("nav.home"),         "⊙"),
+            (t("nav.dashboard"),    "▦"),
+            (t("nav.activity"),     "≡"),
+            (t("nav.troubleshoot"), "⚙"),
+            (t("nav.settings"),     "◇"),
+            (t("nav.deploy"),       "△"),
         ]
         self._nav_buttons = []
         nav_container = QWidget()
@@ -7979,6 +8403,10 @@ class AppController(QObject):
         self.db = AppDatabase()
         self.ops = SystemOps(self.db)
         self.instance = None
+
+        # Kaydedilen dili global değişkene yükle (tüm t() çağrıları için)
+        global _APP_LANG
+        _APP_LANG = self.db.get_setting("language", "tr")
 
         # Main stack window
         self._win = QMainWindow()
