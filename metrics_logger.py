@@ -47,7 +47,7 @@ except ImportError:
 POLL_INTERVAL    = 5
 DEFAULT_OUTPUT   = "results_B.csv"
 PROM_URL         = "http://localhost:9090"
-NAMESPACE        = "autoscaleops-74068768"
+NAMESPACE        = "autoscaleops"
 APP_LABEL        = "autoscaleops-app"
 LATENCY_LIVE     = Path(__file__).parent / "latency_live.json"
 SPIKE_EVENTS_FILE = Path(__file__).parent / "spike_events.jsonl"
