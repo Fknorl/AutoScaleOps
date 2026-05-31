@@ -1020,16 +1020,21 @@ for i in range(0, len(actual_v) - 24, 24):
     if 24 in p:
         preds_vis.append(p[24])
 
-preds_vis = np.array(preds_vis)
-n_vis     = min(len(actual_v) - 24, len(preds_vis))
+preds_vis  = np.array(preds_vis)
+n_preds    = len(preds_vis)
+
+# preds_vis[k]: test_s + k*24 anında yapılan 24 saatlik tahmin
+# Hedef zaman: idx_v[24], idx_v[48], idx_v[72] ...
+pred_times = idx_v[24::24][:n_preds]
+n_common   = min(len(pred_times), n_preds)
 
 fig, ax = plt.subplots(figsize=(14, 5))
-ax.plot(idx_v[:n_vis], actual_v[:n_vis] / 1e6,
+ax.plot(idx_v, actual_v / 1e6,
         label="Gerçek Trafik", color="#4F46E5", lw=1.1)
-ax.plot(idx_v[24:n_vis + 24:24], preds_vis[:n_vis // 24] / 1e6,
+ax.plot(pred_times[:n_common], preds_vis[:n_common] / 1e6,
         label=f"{best_m} Tahmini (24 saat sonrası)",
         color="#F59E0B", lw=1.1, linestyle="--", marker="o",
-        markersize=4, alpha=0.85)
+        markersize=5, alpha=0.85)
 ax.set_title(f"Gerçek Trafik vs {best_m} Tahmini — Son 7 Gün")
 ax.set_ylabel("Görüntüleme (Milyon)")
 ax.xaxis.set_major_formatter(mdates.DateFormatter("%b %d"))
