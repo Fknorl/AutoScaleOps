@@ -85,6 +85,7 @@ _STRINGS: dict[str, dict[str, str]] = {
     "nav.troubleshoot":  {"tr": "Sorun Gider",  "en": "Troubleshoot"},
     "nav.settings":      {"tr": "Ayarlar",      "en": "Settings"},
     "nav.deploy":        {"tr": "Deploy",       "en": "Deploy"},
+    "nav.ai_profile":    {"tr": "AI Profil",    "en": "AI Profile"},
     # Settings panel
     "settings.title":           {"tr": "Ayarlar",                      "en": "Settings"},
     "settings.preferences":     {"tr": "Tercihler",                    "en": "Preferences"},
@@ -307,6 +308,10 @@ QHeaderView::section {{
     font-size: 11px;
     letter-spacing: 0.5px;
 }}
+/* ── QSlider — font-size sabitleniyor (QFont::setPointSize uyarısını engeller) ── */
+QSlider {{
+    font-size: 12px;
+}}
 /* ── Scrollbars ── */
 QScrollBar:vertical {{
     background: transparent;
@@ -518,6 +523,21 @@ def _write_active_project_json(name: str, port: int, service: str) -> None:
         )
     except Exception:
         pass
+
+
+def _sanitize_docker_name(name: str) -> str:
+    """Proje adını Docker image tag formatına dönüştür.
+    Docker kuralı: [a-z0-9]+(?:[._-][a-z0-9]+)*
+    Türkçe karakterler ASCII karşılıklarına çevrilir.
+    """
+    import re as _re
+    import unicodedata as _ud
+    # Unicode normalize → ASCII (ö→o, ü→u, ş→s, ğ→g, ı→i, ç→c)
+    nfkd = _ud.normalize("NFKD", name)
+    ascii_str = nfkd.encode("ascii", "ignore").decode("ascii")
+    # Küçük harf, alfanumerik olmayan → tire
+    sanitized = _re.sub(r"[^a-z0-9]+", "-", ascii_str.lower()).strip("-")
+    return sanitized or "app"
 
 
 def _auto_dockerfile(folder: str) -> Optional[str]:
@@ -768,10 +788,20 @@ def run_ps(cmd: str, timeout: int = 30) -> Tuple[bool, str]:
     try:
         result = subprocess.run(
             ["powershell", "-NoProfile", "-NonInteractive", "-Command", cmd],
-            capture_output=True, text=True, encoding="utf-8", timeout=timeout
+            capture_output=True, timeout=timeout
         )
-        out = (result.stdout or "").strip()
-        err = (result.stderr or "").strip()
+        # bytes → str: önce utf-8, olmadı cp1254 (Türkçe Windows), olmadı latin-1
+        def _decode(b: bytes) -> str:
+            if not b:
+                return ""
+            for enc in ("utf-8", "cp1254", "latin-1"):
+                try:
+                    return b.decode(enc)
+                except Exception:
+                    continue
+            return b.decode("utf-8", errors="replace")
+        out = _decode(result.stdout).strip()
+        err = _decode(result.stderr).strip()
         if result.returncode == 0:
             return True, out
         return False, err or out
@@ -843,7 +873,20 @@ class AppDatabase:
                     deployed_at TEXT,
                     is_active INTEGER DEFAULT 0
                 );
+                CREATE TABLE IF NOT EXISTS traffic_profile (
+                    hour INTEGER PRIMARY KEY,
+                    weight REAL DEFAULT 1.0,
+                    label TEXT DEFAULT ''
+                );
+                CREATE TABLE IF NOT EXISTS domain_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL,
+                    event_date TEXT NOT NULL,
+                    safety_margin REAL DEFAULT 0.3,
+                    notes TEXT DEFAULT ''
+                );
             """)
+            self._ensure_default_profile()
             self._ensure_default_project()
             self.conn.commit()
 
@@ -1047,6 +1090,68 @@ class AppDatabase:
                 self.conn.execute(f"UPDATE users SET {k}=? WHERE id=?", (v, user_id))
             self.conn.commit()
 
+    # ── Domain Profil Yönetimi ───────────────────────────────────────────────
+
+    def _ensure_default_profile(self):
+        cur = self.conn.execute("SELECT COUNT(*) FROM traffic_profile")
+        if cur.fetchone()[0] == 0:
+            self.conn.executemany(
+                "INSERT INTO traffic_profile (hour, weight, label) VALUES (?,?,?)",
+                [(h, 1.0, "") for h in range(24)]
+            )
+
+    def get_traffic_profile(self) -> dict:
+        with self._lock:
+            cur = self.conn.execute("SELECT hour, weight, label FROM traffic_profile ORDER BY hour")
+            return {row[0]: {"weight": row[1], "label": row[2]} for row in cur.fetchall()}
+
+    def set_hour_weight(self, hour: int, weight: float, label: str = "") -> None:
+        with self._lock:
+            self.conn.execute(
+                "INSERT OR REPLACE INTO traffic_profile (hour, weight, label) VALUES (?,?,?)",
+                (hour, round(max(0.1, min(3.0, weight)), 2), label)
+            )
+            self.conn.commit()
+
+    def set_full_profile(self, weights: dict) -> None:
+        with self._lock:
+            self.conn.executemany(
+                "INSERT OR REPLACE INTO traffic_profile (hour, weight, label) VALUES (?,?,?)",
+                [(h, round(max(0.1, min(3.0, w.get("weight", 1.0))), 2), w.get("label", ""))
+                 for h, w in weights.items()]
+            )
+            self.conn.commit()
+
+    def get_domain_events(self) -> list:
+        with self._lock:
+            cur = self.conn.execute(
+                "SELECT id, name, event_date, safety_margin, notes FROM domain_events ORDER BY event_date"
+            )
+            return [dict(zip(["id","name","event_date","safety_margin","notes"], r)) for r in cur.fetchall()]
+
+    def add_domain_event(self, name: str, event_date: str, safety_margin: float = 0.3, notes: str = "") -> int:
+        with self._lock:
+            cur = self.conn.execute(
+                "INSERT INTO domain_events (name, event_date, safety_margin, notes) VALUES (?,?,?,?)",
+                (name, event_date, round(max(0.0, min(1.0, safety_margin)), 2), notes)
+            )
+            self.conn.commit()
+            return cur.lastrowid
+
+    def delete_domain_event(self, event_id: int) -> None:
+        with self._lock:
+            self.conn.execute("DELETE FROM domain_events WHERE id=?", (event_id,))
+            self.conn.commit()
+
+    def build_profile_json(self) -> dict:
+        profile = self.get_traffic_profile()
+        events  = self.get_domain_events()
+        return {
+            "hours": {str(h): v["weight"] for h, v in profile.items()},
+            "events": [{"name": e["name"], "date": e["event_date"],
+                        "margin": e["safety_margin"]} for e in events]
+        }
+
     # ── Proje Yönetimi ──────────────────────────────────────────────────────
 
     def _ensure_default_project(self):
@@ -1173,6 +1278,16 @@ class SystemOps:
         try:
             if INSTANCE_PATH.exists():
                 data = json.loads(INSTANCE_PATH.read_text(encoding="utf-8"))
+                # Eski hash-tabanlı profilleri normalize et
+                changed = False
+                if data.get("minikube_profile", "autoscaleops") != "autoscaleops":
+                    data["minikube_profile"] = "autoscaleops"
+                    changed = True
+                if data.get("namespace", "autoscaleops") != "autoscaleops":
+                    data["namespace"] = "autoscaleops"
+                    changed = True
+                if changed:
+                    INSTANCE_PATH.write_text(json.dumps(data, indent=2), encoding="utf-8")
                 return data
         except Exception:
             pass
@@ -1189,19 +1304,19 @@ class SystemOps:
             instance_id = hashlib.sha256(raw.encode()).hexdigest()[:8]
             data = {
                 "instance_id": instance_id,
-                "namespace": f"autoscaleops-{instance_id}",
-                "minikube_profile": f"autoscaleops-{instance_id}",
+                "namespace": "autoscaleops",
+                "minikube_profile": "autoscaleops",
                 "created_at": datetime.now().isoformat()
             }
             APP_DIR.mkdir(parents=True, exist_ok=True)
             INSTANCE_PATH.write_text(json.dumps(data, indent=2), encoding="utf-8")
             return data
-        except Exception as e:
+        except Exception:
             fallback_id = secrets.token_hex(4)
             data = {
                 "instance_id": fallback_id,
-                "namespace": f"autoscaleops-{fallback_id}",
-                "minikube_profile": f"autoscaleops-{fallback_id}",
+                "namespace": "autoscaleops",
+                "minikube_profile": "autoscaleops",
                 "created_at": datetime.now().isoformat()
             }
             APP_DIR.mkdir(parents=True, exist_ok=True)
@@ -1783,6 +1898,52 @@ class SystemOps:
         except Exception as e:
             return False, str(e)
 
+    # ── Domain Profil Senkronizasyonu ────────────────────────────────────────
+
+    def sync_domain_profile(self) -> Tuple[bool, str]:
+        """
+        SQLite'taki traffic_profile ve domain_events verilerini iki yere yazar:
+        1. Kubernetes ConfigMap 'domain-profile' (pod ortamı için)
+        2. ~/.autoscaleops/domain_profile.json (local predictor.py için)
+        Predictor otomatik olarak yeni profili okur (TTL: 60s).
+        """
+        import json as _json
+
+        profile_data = self.db.build_profile_json()
+        profile_json = _json.dumps(profile_data, ensure_ascii=False, indent=2)
+
+        # ── 1. Local dosyaya yaz (predictor.py local çalışırken okur)
+        local_path = APP_DIR / "domain_profile.json"
+        try:
+            APP_DIR.mkdir(parents=True, exist_ok=True)
+            local_path.write_text(profile_json, encoding="utf-8")
+        except Exception as e:
+            return False, f"Local profil yazma hatasi: {e}"
+
+        # ── 2. Kubernetes ConfigMap (K8s pod ortamı için)
+        try:
+            instance = self.db.get_instance()
+            if not instance:
+                # Cluster yok ama local yazma başarılı
+                return True, "Profil yerel olarak kaydedildi (cluster yok)"
+            ns = instance.get("namespace", "")
+            if not ns:
+                return True, "Profil yerel olarak kaydedildi (namespace yok)"
+
+            cmd = (
+                f"kubectl create configmap domain-profile "
+                f"--from-literal=profile.json='{profile_json}' "
+                f"-n {ns} --dry-run=client -o yaml | "
+                f"kubectl apply -f - -n {ns}"
+            )
+            ok, out = run_ps(cmd, timeout=30)
+            if ok:
+                return True, "Domain profil senkronize edildi (local + K8s)"
+            # K8s başarısız olsa bile local kaydedildi
+            return True, f"Profil yerel kaydedildi (K8s: {out or 'hata'})"
+        except Exception as e:
+            return True, f"Profil yerel kaydedildi (K8s hatasi: {e})"
+
     def start_cloudflare_tunnel(self, domain: str = "") -> Tuple[bool, str]:
         self.stop_tunnel()
         self.db.set_setting("tunnel_type", "cloudflare")
@@ -1856,9 +2017,13 @@ class SystemOps:
             if cb:
                 cb(msg, lvl)
 
-        instance = self.ensure_instance()
-        namespace = instance["namespace"]
-        profile   = instance["minikube_profile"]
+        instance   = self.ensure_instance()
+        namespace  = instance["namespace"]
+        profile    = instance["minikube_profile"]
+        safe_name  = _sanitize_docker_name(name)   # Docker-uyumlu tag
+        if safe_name != name:
+            emit(f"       ℹ️  Proje adı Docker formatına dönüştürüldü: '{name}' → '{safe_name}'", "info")
+            name = safe_name
 
         # ── Adım 1: Dockerfile + .dockerignore ───────────────────────────
         emit("[1/7]  Dockerfile hazırlanıyor…", "info")
@@ -3049,13 +3214,23 @@ class SectionTitle(QLabel):
 
 
 class LogWidget(QTextEdit):
+    # Worker thread'lerden güvenli çağrı için internal sinyal
+    _line_signal = pyqtSignal(str, str)
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setReadOnly(True)
         self.setFont(QFont("Consolas", 10))
         self.setStyleSheet(f"background:{C_BG}; color:{C_TEXT}; border:1px solid {C_BORDER}; border-radius:6px;")
+        self._line_signal.connect(self._do_append, Qt.ConnectionType.QueuedConnection)
 
     def append_line(self, text: str, level: str = "info"):
+        """Thread-safe: her thread'den çağrılabilir."""
+        self._line_signal.emit(text, level)
+
+    @pyqtSlot(str, str)
+    def _do_append(self, text: str, level: str):
+        """Her zaman main thread'de çalışır."""
         colors = {"info": C_TEXT, "ok": C_GREEN, "warn": C_YELLOW, "error": C_RED}
         color = colors.get(level, C_TEXT)
         ts = datetime.now().strftime("%H:%M:%S")
@@ -4878,6 +5053,30 @@ class HomePanel(QWidget):
         self._launch_worker.finished.connect(self._on_launch_done)
         self._launch_worker.start()
 
+    def _check_port_forward(self):
+        """Port-forward watchdog: ölmüşse sessizce yeniden başlat."""
+        port = int(self.ops.db.get_setting("active_project_port", "8080"))
+        if self.ops._is_port_open(port):
+            return
+        # Port kapalı — arka planda yeniden başlat
+        def _restart():
+            try:
+                instance = self.ops.ensure_instance()
+                ns = instance.get("namespace", "autoscaleops")
+                self.ops.start_port_forwards(ns)
+            except Exception:
+                pass
+        threading.Thread(target=_restart, daemon=True).start()
+        # Kullanıcıya kısa bilgi ver
+        self._error_card.show_error(
+            "Port-Forward Yeniden Başlatıldı",
+            f"localhost:{port} kapandı — bağlantı otomatik yeniden kuruldu. "
+            "Birkaç saniye içinde ngrok tüneli de düzelecek.",
+            warning=True
+        )
+        # 10 sn sonra temizle
+        QTimer.singleShot(10000, self._error_card.hide_error)
+
     def _do_stop(self):
         dlg = ShutdownDialog(self)
         if dlg.exec() != QDialog.DialogCode.Accepted:
@@ -4888,6 +5087,10 @@ class HomePanel(QWidget):
 
         if self._launch_worker and self._launch_worker.isRunning():
             self._launch_worker.quit()
+
+        # Watchdog'u durdur
+        if hasattr(self, '_pf_watchdog'):
+            self._pf_watchdog.stop()
 
         # UI'yı hemen sıfırla
         self._is_running = False
@@ -4921,6 +5124,9 @@ class HomePanel(QWidget):
         sw = mapping.get(step)
         if sw:
             sw.set_status(status, sub)
+        # Adım başarıyla tamamlanınca hata kartını temizle
+        if status == "ok":
+            self._error_card.hide_error()
 
     def _on_error(self, step: str, title: str, desc: str):
         fix_labels = {
@@ -4951,6 +5157,11 @@ class HomePanel(QWidget):
             self._btn_stop_all.setVisible(False)
             self._btn_launch.setVisible(True)
         else:
+            # Port-forward watchdog: her 30sn'de port ölü mü kontrol et, ölüyse yeniden başlat
+            self._pf_watchdog = QTimer(self)
+            self._pf_watchdog.timeout.connect(self._check_port_forward)
+            self._pf_watchdog.start(30000)
+
             # Local modda da URL kartını göster
             if self._mode == "local":
                 port = int(self.ops.db.get_setting("active_project_port", "8080"))
@@ -7790,6 +8001,9 @@ class DashboardPanel(QWidget):
 #  SCREEN 2 — MAIN APPLICATION WINDOW
 # ─────────────────────────────────────────────
 class MainWindow(QMainWindow):
+    # Worker thread'lerden main thread'e cluster durumu iletmek için
+    _cluster_status_signal = pyqtSignal(bool)
+
     def __init__(self, db, ops, parent=None):
         super().__init__(parent)
         self.db = db
@@ -7826,17 +8040,19 @@ class MainWindow(QMainWindow):
 
         # Build panels  — index sırası:
         #   0:Ana Sayfa  1:Dashboard  2:Aktivite
-        #   3:Sorun Gider  4:Ayarlar  5:Deploy
-        self._home_panel     = HomePanel(db, ops)
+        #   3:Sorun Gider  4:Ayarlar  5:Deploy  6:AI Profil
+        self._home_panel      = HomePanel(db, ops)
         self._dashboard_panel = DashboardPanel(db, ops)
-        self._activity_panel = ActivityLogPanel(db)
-        self._trouble_panel  = TroubleshooterPanel(db, ops)
-        self._settings_panel = SettingsPanel(db, ops)
-        self._deploy_panel   = DeployPanel(db, ops)
+        self._activity_panel  = ActivityLogPanel(db)
+        self._trouble_panel   = TroubleshooterPanel(db, ops)
+        self._settings_panel  = SettingsPanel(db, ops)
+        self._deploy_panel    = DeployPanel(db, ops)
+        self._ai_profile_panel = AiProfilePanel(db, ops)
 
         for panel in [self._home_panel, self._dashboard_panel,
                       self._activity_panel, self._trouble_panel,
-                      self._settings_panel, self._deploy_panel]:
+                      self._settings_panel, self._deploy_panel,
+                      self._ai_profile_panel]:
             self._content_stack.addWidget(panel)
 
         # Connect home cluster buttons
@@ -7884,9 +8100,9 @@ class MainWindow(QMainWindow):
         """Dil değiştiğinde navigasyon butonlarını anında güncelle."""
         nav_keys = [
             "nav.home", "nav.dashboard", "nav.activity",
-            "nav.troubleshoot", "nav.settings", "nav.deploy",
+            "nav.troubleshoot", "nav.settings", "nav.deploy", "nav.ai_profile",
         ]
-        icons = ["⊙", "▦", "≡", "⚙", "◇", "△"]
+        icons = ["⊙", "▦", "≡", "⚙", "◇", "△", "✦"]
         for i, (btn, key, icon) in enumerate(zip(self._nav_buttons, nav_keys, icons)):
             btn.setText(f"  {icon}   {t(key)}")
 
@@ -7941,7 +8157,7 @@ class MainWindow(QMainWindow):
         lay.addSpacing(10)
 
         # ── Nav items ───────────────────────────────────────────────────────
-        # 0:Ana Sayfa  1:Dashboard  2:Aktivite  3:Sorun Gider  4:Ayarlar  5:Deploy
+        # 0:Ana Sayfa  1:Dashboard  2:Aktivite  3:Sorun Gider  4:Ayarlar  5:Deploy  6:AI Profil
         nav_items = [
             (t("nav.home"),         "⊙"),
             (t("nav.dashboard"),    "▦"),
@@ -7949,6 +8165,7 @@ class MainWindow(QMainWindow):
             (t("nav.troubleshoot"), "⚙"),
             (t("nav.settings"),     "◇"),
             (t("nav.deploy"),       "△"),
+            (t("nav.ai_profile"),   "✦"),
         ]
         self._nav_buttons = []
         nav_container = QWidget()
@@ -8183,6 +8400,64 @@ class MainWindow(QMainWindow):
         self._cluster_worker_thread = None
         self._cluster_worker = None
 
+        # Cluster status sinyalini main thread slot'una bağla
+        self._cluster_status_signal.connect(
+            self._update_cluster_ui, Qt.ConnectionType.QueuedConnection
+        )
+
+        # ── ARIMA Predictor otomatik başlatma ───────────────────────────────
+        # predictor.py cluster hazır olunca arka planda başlar.
+        # Zaten çalışıyorsa (port kontrol) yeniden başlatılmaz.
+        QTimer.singleShot(8000, self._start_predictor_if_needed)
+
+    def _start_predictor_if_needed(self):
+        """
+        ARIMA predictor'ı arka planda başlatır.
+        Pushgateway üzerinden predicted_rps_30min metriğini üretir.
+        Zaten bir predictor süreci çalışıyorsa yeniden başlatmaz.
+        """
+        import threading, subprocess, sys
+        from pathlib import Path as _Path
+
+        predictor_path = _Path(__file__).parent / "ai-model" / "predictor.py"
+        if not predictor_path.exists():
+            return
+
+        # Pushgateway çalışıyor mu? (predictor'ın hedefi)
+        try:
+            import requests as _req
+            r = _req.get("http://127.0.0.1:9091/metrics", timeout=2)
+            pushgw_ok = r.status_code == 200
+        except Exception:
+            pushgw_ok = False
+
+        if not pushgw_ok:
+            return  # Pushgateway yoksa predictor başlatma
+
+        # predicted_rps_30min zaten Prometheus'ta var mı?
+        try:
+            import requests as _req
+            r = _req.get("http://127.0.0.1:9090/api/v1/query",
+                         params={"query": "predicted_rps_30min"}, timeout=3)
+            result = r.json().get("data", {}).get("result", [])
+            if result:
+                return  # Zaten çalışıyor
+        except Exception:
+            pass
+
+        def _run():
+            try:
+                subprocess.Popen(
+                    [sys.executable, str(predictor_path)],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0
+                )
+            except Exception:
+                pass
+
+        threading.Thread(target=_run, daemon=True).start()
+
     @pyqtSlot(dict)
     def _on_hw_snapshot(self, data: dict):
         self._home_panel.update_hardware(data)
@@ -8202,12 +8477,11 @@ class MainWindow(QMainWindow):
 
     def _poll_cluster_status(self):
         def check():
-            return self.ops.get_cluster_status()
-        def update(status):
+            status = self.ops.get_cluster_status()
             running = status.get("running", False)
-            self._update_cluster_ui(running)
-        import threading
-        threading.Thread(target=lambda: update(check()), daemon=True).start()
+            # main thread'e sinyal yolla — UI'ya dokunma
+            self._cluster_status_signal.emit(running)
+        threading.Thread(target=check, daemon=True).start()
 
     def _update_cluster_ui(self, running: bool):
         color = C_GREEN if running else C_RED
@@ -8539,6 +8813,427 @@ class AppController(QObject):
 
 
 # ─────────────────────────────────────────────
+#  AI PROFİL PANELİ
+# ─────────────────────────────────────────────
+class AiProfilePanel(QWidget):
+    """Domain knowledge paneli.
+
+    Üç bölüm:
+      1. 24 saatlik yoğunluk haritası (3 katman: canlı, ort., profil)
+      2. Saatlik profil düzenleyici (kaydırıcılar)
+      3. Etkinlik takvimi
+    """
+    PROM_URL = "http://127.0.0.1:9090/api/v1/query"
+
+    def __init__(self, db, ops, parent=None):
+        super().__init__(parent)
+        self.db  = db
+        self.ops = ops
+        self._live_rps: dict[int, float] = {}   # saat → ortalama RPS (Prom'dan)
+        self._hist_rps: dict[int, float] = {}   # saat → 30 günlük ort. (Prom'dan)
+        self._build_ui()
+        self._timer = QTimer(self)
+        self._timer.timeout.connect(self._refresh_live)
+        self._timer.start(30000)
+        QTimer.singleShot(1500, self._refresh_live)
+
+    # ── UI ─────────────────────────────────────────────────────────────────
+    def _build_ui(self):
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        inner = QWidget()
+        lay = QVBoxLayout(inner)
+        lay.setContentsMargins(28, 24, 28, 28)
+        lay.setSpacing(20)
+
+        # Header
+        hdr = QHBoxLayout()
+        title = QLabel("AI Profil")
+        title.setFont(QFont("Segoe UI", 20, QFont.Weight.Bold))
+        title.setStyleSheet(f"color:{C_TEXT}; background:transparent; border:none;")
+        subtitle = QLabel("Domain knowledge → ARIMA'ya besle")
+        subtitle.setStyleSheet(f"color:{C_TEXT_DIM}; font-size:11px; background:transparent; border:none;")
+        sync_btn = QPushButton("⟳  Kubernetes'e Gönder")
+        sync_btn.setFixedHeight(36)
+        sync_btn.setToolTip("Profil ve etkinlikleri ConfigMap olarak Kubernetes'e uygula")
+        sync_btn.clicked.connect(self._sync_to_k8s)
+        hdr.addWidget(title)
+        hdr.addSpacing(12)
+        hdr.addWidget(subtitle)
+        hdr.addStretch()
+        hdr.addWidget(sync_btn)
+        lay.addLayout(hdr)
+
+        self._sync_lbl = QLabel("")
+        self._sync_lbl.setStyleSheet(f"color:{C_GREEN}; font-size:11px; background:transparent; border:none;")
+        lay.addWidget(self._sync_lbl)
+
+        # ── 1. Yoğunluk Haritası ───────────────────────────────────────────
+        map_card = self._make_card("24 Saatlik Yoğunluk Haritası")
+        map_lay  = map_card.layout()
+
+        # Gösterge
+        legend_row = QHBoxLayout()
+        for color, label in [("#34D399", "Canlı RPS"), ("#818CF8", "Kullanıcı Profili"), ("#FCD34D", "30 Gün Ort.")]:
+            dot = QLabel("●")
+            dot.setStyleSheet(f"color:{color}; font-size:14px; background:transparent; border:none;")
+            lbl = QLabel(label)
+            lbl.setStyleSheet(f"color:{C_TEXT_DIM}; font-size:10px; background:transparent; border:none;")
+            legend_row.addWidget(dot)
+            legend_row.addWidget(lbl)
+            legend_row.addSpacing(12)
+        legend_row.addStretch()
+        map_lay.addLayout(legend_row)
+
+        self._heatmap = _HeatmapWidget(self.db)
+        self._heatmap.setMinimumHeight(200)
+        map_lay.addWidget(self._heatmap)
+        lay.addWidget(map_card)
+
+        # ── 2. Saatlik Profil Düzenleyici ──────────────────────────────────
+        prof_card = self._make_card("Saatlik Yoğunluk Profili  (0.1 = çok düşük · 1.0 = normal · 3.0 = çok yüksek)")
+        prof_lay  = prof_card.layout()
+
+        grid = QGridLayout()
+        grid.setSpacing(6)
+        self._sliders: list[QSlider] = []
+        self._hour_vals: list[QLabel] = []
+
+        profile = self.db.get_traffic_profile()
+
+        for h in range(24):
+            hour_lbl = QLabel(f"{h:02d}")
+            hour_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            hour_lbl.setFixedWidth(28)
+            hour_lbl.setStyleSheet(f"color:{C_TEXT_DIM}; font-size:10px; background:transparent; border:none;")
+
+            sl = QSlider(Qt.Orientation.Vertical)
+            sl.setRange(1, 30)   # 0.1 → 3.0  (×10)
+            sl.setValue(int(round(profile.get(h, {}).get("weight", 1.0) * 10)))
+            sl.setFixedHeight(80)
+            sl.setFixedWidth(22)
+            sl.setStyleSheet(self._slider_style())
+            sl.valueChanged.connect(lambda v, hour=h: self._on_slider(hour, v))
+
+            val_lbl = QLabel(f"{sl.value()/10:.1f}")
+            val_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            val_lbl.setFixedWidth(28)
+            val_lbl.setStyleSheet(f"color:{C_ACCENT}; font-size:10px; font-weight:600; background:transparent; border:none;")
+
+            col = h
+            grid.addWidget(hour_lbl, 0, col, Qt.AlignmentFlag.AlignHCenter)
+            grid.addWidget(sl,       1, col, Qt.AlignmentFlag.AlignHCenter)
+            grid.addWidget(val_lbl,  2, col, Qt.AlignmentFlag.AlignHCenter)
+            self._sliders.append(sl)
+            self._hour_vals.append(val_lbl)
+
+        prof_lay.addLayout(grid)
+
+        reset_btn = QPushButton("Sıfırla (tümünü 1.0)")
+        reset_btn.setFixedHeight(30)
+        reset_btn.clicked.connect(self._reset_profile)
+        prof_lay.addWidget(reset_btn)
+        lay.addWidget(prof_card)
+
+        # ── 3. Etkinlik Takvimi ────────────────────────────────────────────
+        ev_card = self._make_card("Etkinlik Takvimi  (Yaklaşan etkinliklerde güvenlik marjı uygulanır)")
+        ev_lay  = ev_card.layout()
+
+        # Giriş formu
+        form = QHBoxLayout()
+        self._ev_name  = QLineEdit()
+        self._ev_name.setPlaceholderText("Etkinlik adı (örn: Büyük İndirim Günü)")
+        self._ev_name.setFixedHeight(34)
+        self._ev_date  = QDateEdit()
+        self._ev_date.setCalendarPopup(True)
+        self._ev_date.setDate(QDate.currentDate().addDays(1))
+        self._ev_date.setFixedHeight(34)
+        self._ev_date.setFixedWidth(130)
+        self._ev_margin = QDoubleSpinBox()
+        self._ev_margin.setRange(0.0, 1.0)
+        self._ev_margin.setSingleStep(0.05)
+        self._ev_margin.setValue(0.30)
+        self._ev_margin.setFixedHeight(34)
+        self._ev_margin.setFixedWidth(80)
+        self._ev_margin.setToolTip("Güvenlik marjı: 0.3 = %30 ekstra kapasite")
+        add_btn = QPushButton("+ Ekle")
+        add_btn.setFixedHeight(34)
+        add_btn.clicked.connect(self._add_event)
+        form.addWidget(self._ev_name, 3)
+        form.addWidget(self._ev_date, 1)
+        form.addWidget(QLabel("Marj:"), 0)
+        form.addWidget(self._ev_margin, 0)
+        form.addWidget(add_btn, 0)
+        ev_lay.addLayout(form)
+
+        # Etkinlik listesi
+        self._ev_list = QListWidget()
+        self._ev_list.setMaximumHeight(180)
+        self._ev_list.setStyleSheet(f"""
+            QListWidget {{
+                background: {C_BG};
+                border: 1px solid {C_BORDER};
+                border-radius: 8px;
+                color: {C_TEXT};
+                font-size: 12px;
+            }}
+            QListWidget::item {{ padding: 6px 10px; border:none; }}
+            QListWidget::item:selected {{ background: {C_SURFACE2}; }}
+        """)
+        del_btn = QPushButton("Seçili Etkinliği Sil")
+        del_btn.setFixedHeight(30)
+        del_btn.clicked.connect(self._delete_event)
+        ev_lay.addWidget(self._ev_list)
+        ev_lay.addWidget(del_btn)
+        lay.addWidget(ev_card)
+
+        lay.addStretch()
+        scroll.setWidget(inner)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.addWidget(scroll)
+
+        self._load_events()
+
+    # ── Yardımcı widget oluşturucu ──────────────────────────────────────────
+    def _make_card(self, title: str) -> QFrame:
+        card = QFrame()
+        card.setStyleSheet(
+            f"QFrame {{ background:{C_SURFACE}; border:1px solid rgba(255,255,255,0.08); border-radius:18px; }}"
+        )
+        _add_shadow(card, blur=24, offset_y=6, alpha=70)
+        lay = QVBoxLayout(card)
+        lay.setContentsMargins(18, 14, 18, 14)
+        lay.setSpacing(10)
+        hdr = QLabel(title)
+        hdr.setFont(QFont("Segoe UI", 11, QFont.Weight.Bold))
+        hdr.setStyleSheet(f"color:{C_TEXT}; background:transparent; border:none;")
+        lay.addWidget(hdr)
+        return card
+
+    @staticmethod
+    def _slider_style() -> str:
+        return f"""
+            QSlider::groove:vertical {{
+                background: {C_SURFACE2};
+                width: 6px;
+                border-radius: 3px;
+            }}
+            QSlider::handle:vertical {{
+                background: {C_ACCENT};
+                height: 12px;
+                width: 12px;
+                margin: 0 -3px;
+                border-radius: 6px;
+            }}
+            QSlider::sub-page:vertical {{
+                background: {C_ACCENT2};
+                border-radius: 3px;
+            }}
+        """
+
+    # ── Profil işlemleri ────────────────────────────────────────────────────
+    def _on_slider(self, hour: int, raw_val: int):
+        weight = raw_val / 10.0
+        self._hour_vals[hour].setText(f"{weight:.1f}")
+        color = C_RED if weight > 2.0 else (C_YELLOW if weight > 1.3 else C_ACCENT)
+        self._hour_vals[hour].setStyleSheet(
+            f"color:{color}; font-size:10px; font-weight:600; background:transparent; border:none;"
+        )
+        self.db.set_hour_weight(hour, weight)
+        self._heatmap.update_profile(hour, weight)
+
+    def _reset_profile(self):
+        for h, sl in enumerate(self._sliders):
+            sl.setValue(10)
+        self.db.set_full_profile({h: {"weight": 1.0, "label": ""} for h in range(24)})
+        self._heatmap.update()
+
+    # ── Etkinlik işlemleri ──────────────────────────────────────────────────
+    def _add_event(self):
+        name   = self._ev_name.text().strip()
+        date   = self._ev_date.date().toString("yyyy-MM-dd")
+        margin = self._ev_margin.value()
+        if not name:
+            return
+        self.db.add_domain_event(name, date, margin)
+        self._ev_name.clear()
+        self._load_events()
+
+    def _delete_event(self):
+        item = self._ev_list.currentItem()
+        if not item:
+            return
+        event_id = item.data(Qt.ItemDataRole.UserRole)
+        if event_id is not None:
+            self.db.delete_domain_event(event_id)
+            self._load_events()
+
+    def _load_events(self):
+        self._ev_list.clear()
+        for ev in self.db.get_domain_events():
+            text = f"{ev['event_date']}   {ev['name']}   (marj: %{int(ev['safety_margin']*100)})"
+            item = QListWidgetItem(text)
+            item.setData(Qt.ItemDataRole.UserRole, ev["id"])
+            self._ev_list.addItem(item)
+
+    # ── Kubernetes senkronizasyonu ───────────────────────────────────────────
+    def _sync_to_k8s(self):
+        self._sync_lbl.setText("Gönderiliyor...")
+        self._sync_lbl.setStyleSheet(f"color:{C_YELLOW}; font-size:11px; background:transparent; border:none;")
+        ok, msg = self.ops.sync_domain_profile()
+        if ok:
+            self._sync_lbl.setText(f"✓  {msg}")
+            self._sync_lbl.setStyleSheet(f"color:{C_GREEN}; font-size:11px; background:transparent; border:none;")
+        else:
+            self._sync_lbl.setText(f"✗  {msg}")
+            self._sync_lbl.setStyleSheet(f"color:{C_RED}; font-size:11px; background:transparent; border:none;")
+
+    # ── Canlı veri çekme ────────────────────────────────────────────────────
+    def _refresh_live(self):
+        try:
+            import requests as _req
+            # Son 1 saatin RPS'ini saat bazında grupla
+            resp = _req.get(
+                self.PROM_URL,
+                params={"query": "sum(rate(http_requests_total[5m]))"},
+                timeout=5
+            )
+            data = resp.json()
+            if data.get("status") == "success" and data["data"]["result"]:
+                val = float(data["data"]["result"][0]["value"][1])
+                current_hour = __import__("datetime").datetime.now().hour
+                self._live_rps[current_hour] = val
+                self._heatmap.update_live(current_hour, val)
+        except Exception:
+            pass
+
+
+# ── Yoğunluk haritası widget ──────────────────────────────────────────────────
+class _HeatmapWidget(QWidget):
+    """24 saatlik yoğunluk haritası: profil + canlı + geçmiş ortalaması."""
+
+    def __init__(self, db, parent=None):
+        super().__init__(parent)
+        self.db          = db
+        self._profile    = {h: 1.0 for h in range(24)}
+        self._live       = {}
+        self._hist       = {}
+        self._load_profile()
+        self.setMinimumHeight(200)
+
+    def _load_profile(self):
+        p = self.db.get_traffic_profile()
+        self._profile = {h: v["weight"] for h, v in p.items()}
+
+    def update_profile(self, hour: int, weight: float):
+        self._profile[hour] = weight
+        self.update()
+
+    def update_live(self, hour: int, val: float):
+        self._live[hour] = val
+        self.update()
+
+    def update_hist(self, hour: int, val: float):
+        self._hist[hour] = val
+        self.update()
+
+    def paintEvent(self, event):
+        from PyQt6.QtGui import QPainter, QColor, QPen, QFont as _QFont
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        w = self.width()
+        h = self.height()
+        padding_l, padding_r = 40, 10
+        padding_b, padding_t = 30, 10
+        bar_area_w = w - padding_l - padding_r
+        bar_area_h = h - padding_b - padding_t
+        bar_w = bar_area_w / 24
+        bar_gap = max(1, int(bar_w * 0.15))
+
+        # Maksimum değer hesapla
+        all_vals = list(self._profile.values()) + list(self._live.values()) + list(self._hist.values())
+        max_val = max(all_vals) if all_vals else 1.0
+        if max_val < 0.01:
+            max_val = 1.0
+
+        # Arka plan
+        painter.fillRect(0, 0, w, h, QColor(C_BG))
+
+        # Y ekseni çizgisi
+        pen = QPen(QColor(C_BORDER))
+        pen.setWidth(1)
+        painter.setPen(pen)
+        painter.drawLine(padding_l, padding_t, padding_l, h - padding_b)
+        painter.drawLine(padding_l, h - padding_b, w - padding_r, h - padding_b)
+
+        # Y eksen etiketleri
+        font = _QFont("Segoe UI", 8)
+        painter.setFont(font)
+        painter.setPen(QColor(C_TEXT_DIM))
+        for frac in [0.0, 0.5, 1.0]:
+            y = int(h - padding_b - frac * bar_area_h)
+            painter.drawText(2, y + 4, 34, 12, Qt.AlignmentFlag.AlignRight, f"{max_val*frac:.1f}")
+            if frac > 0:
+                pen2 = QPen(QColor(C_BORDER))
+                pen2.setStyle(Qt.PenStyle.DotLine)
+                painter.setPen(pen2)
+                painter.drawLine(padding_l, y, w - padding_r, y)
+                painter.setPen(QColor(C_TEXT_DIM))
+
+        current_hour = __import__("datetime").datetime.now().hour
+
+        for hour in range(24):
+            x = int(padding_l + hour * bar_w)
+            bw = int(bar_w - bar_gap)
+
+            # Profil barı
+            prof_val = self._profile.get(hour, 1.0)
+            prof_h   = int((prof_val / max_val) * bar_area_h)
+            alpha    = 200 if hour == current_hour else 140
+            painter.fillRect(
+                x, h - padding_b - prof_h, bw, prof_h,
+                QColor(129, 140, 248, alpha)   # C_ACCENT (#818CF8)
+            )
+
+            # Canlı RPS çubuğu (ince, üst kısım)
+            if hour in self._live:
+                live_h = int((self._live[hour] / max_val) * bar_area_h)
+                painter.fillRect(
+                    x, h - padding_b - live_h, bw, 4,
+                    QColor(52, 211, 153, 220)   # C_GREEN
+                )
+
+            # Geçmiş ort. çizgi
+            if hour in self._hist:
+                hist_y = int(h - padding_b - (self._hist[hour] / max_val) * bar_area_h)
+                pen3 = QPen(QColor(252, 211, 77, 180))  # C_YELLOW
+                pen3.setWidth(2)
+                painter.setPen(pen3)
+                if hour > 0 and (hour - 1) in self._hist:
+                    prev_y = int(h - padding_b - (self._hist[hour-1] / max_val) * bar_area_h)
+                    prev_x = int(padding_l + (hour - 1) * bar_w + bw // 2)
+                    painter.drawLine(prev_x, prev_y, x + bw // 2, hist_y)
+
+            # Saat etiketi (her 3 saatte bir)
+            if hour % 3 == 0:
+                painter.setPen(QColor(C_TEXT_DIM))
+                painter.setFont(_QFont("Segoe UI", 8))
+                painter.drawText(x, h - padding_b + 4, bw, 20, Qt.AlignmentFlag.AlignHCenter, str(hour))
+
+            # Şu anki saati vurgula
+            if hour == current_hour:
+                pen4 = QPen(QColor(C_TEXT))
+                pen4.setWidth(1)
+                painter.setPen(pen4)
+                painter.drawRect(x, padding_t, bw, bar_area_h)
+
+        painter.end()
+
+
+# ─────────────────────────────────────────────
 #  DEPLOY PANEL
 # ─────────────────────────────────────────────
 class DeployPanel(QWidget):
@@ -8552,6 +9247,8 @@ class DeployPanel(QWidget):
 
     #: Ana pencereye "Ana Sayfa'ya git" veya "Proje Yönetimine git" mesajı gönderir
     navigate_request = pyqtSignal(str)   # "_nav_home" | "_nav_deploy_mgr"
+    #: Deploy thread'inden main thread'e sonuç iletir (thread-safe)
+    _deploy_done = pyqtSignal(bool, str, str, str, int)  # ok, msg, name, folder, port
 
     # Proje türü metadatası (ikon, renk, port, açıklama)
     _TYPE_INFO = {
@@ -8567,6 +9264,7 @@ class DeployPanel(QWidget):
         self.db  = db
         self.ops = ops
         self._last_analysis: Optional[Dict] = None   # son _analyze_project() sonucu
+        self._deploy_done.connect(self._on_deploy_finished, Qt.ConnectionType.QueuedConnection)
 
         lay = QVBoxLayout(self)
         lay.setContentsMargins(24, 24, 24, 24)
@@ -8857,6 +9555,56 @@ class DeployPanel(QWidget):
         sb_lay.addLayout(sb_btn_col)
         self._success_banner.setVisible(False)
         lc_lay.addWidget(self._success_banner)
+
+        # Hata Yardımcısı (deploy başarısız olunca görünür)
+        self._help_panel = QFrame()
+        self._help_panel.setStyleSheet(
+            f"QFrame {{ background:rgba(248,113,113,0.08); "
+            f"border:1px solid rgba(248,113,113,0.35); border-radius:12px; }}"
+        )
+        hp_lay = QVBoxLayout(self._help_panel)
+        hp_lay.setContentsMargins(16, 12, 16, 12)
+        hp_lay.setSpacing(8)
+        hp_hdr = QHBoxLayout()
+        hp_icon = QLabel("🤖")
+        hp_icon.setFont(QFont("Segoe UI", 16))
+        hp_icon.setStyleSheet("background:transparent; border:none;")
+        hp_title = QLabel("Deploy Yardımcısı")
+        hp_title.setFont(QFont("Segoe UI", 12, QFont.Weight.Bold))
+        hp_title.setStyleSheet(f"color:{C_RED}; background:transparent; border:none;")
+        hp_hdr.addWidget(hp_icon)
+        hp_hdr.addWidget(hp_title)
+        hp_hdr.addStretch()
+        hp_lay.addLayout(hp_hdr)
+        self._help_category = QLabel("")
+        self._help_category.setFont(QFont("Segoe UI", 10, QFont.Weight.Bold))
+        self._help_category.setStyleSheet(f"color:{C_YELLOW}; background:transparent; border:none;")
+        hp_lay.addWidget(self._help_category)
+        self._help_steps = QLabel("")
+        self._help_steps.setFont(QFont("Segoe UI", 10))
+        self._help_steps.setStyleSheet(f"color:{C_TEXT}; background:transparent; border:none;")
+        self._help_steps.setWordWrap(True)
+        hp_lay.addWidget(self._help_steps)
+        self._help_cmd = QFrame()
+        self._help_cmd.setStyleSheet(
+            f"QFrame {{ background:{C_BG}; border:1px solid {C_BORDER}; border-radius:6px; }}"
+        )
+        hc_lay = QHBoxLayout(self._help_cmd)
+        hc_lay.setContentsMargins(10, 6, 10, 6)
+        self._help_cmd_lbl = QLabel("")
+        self._help_cmd_lbl.setFont(QFont("Consolas, Courier New", 10))
+        self._help_cmd_lbl.setStyleSheet(f"color:{C_ACCENT}; background:transparent; border:none;")
+        self._help_cmd_lbl.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        copy_btn = QPushButton("Kopyala")
+        copy_btn.setFixedHeight(26)
+        copy_btn.setFixedWidth(70)
+        copy_btn.clicked.connect(lambda: QApplication.clipboard().setText(self._help_cmd_lbl.text()))
+        hc_lay.addWidget(self._help_cmd_lbl, 1)
+        hc_lay.addWidget(copy_btn)
+        hp_lay.addWidget(self._help_cmd)
+        self._help_panel.setVisible(False)
+        lc_lay.addWidget(self._help_panel)
+
         lay.addWidget(log_card)
         lay.addStretch()
 
@@ -9287,38 +10035,42 @@ class DeployPanel(QWidget):
         )
 
         def do():
+            # Sadece iş mantığı — UI'a dokunma
             ok, msg = self.ops.deploy_app(folder, name, port, self._deploy_log.append_line)
-            self._btn_deploy.setEnabled(True)
             if ok:
+                # DB güncellemeleri thread'den yapılabilir (mutex'li SQLite)
                 self.db.add_project(name, folder, port, f"{name}-service", f"{name}:latest")
-                self._refresh_project_list()
-                # Aktif proje yoksa otomatik aktif yap
                 current_active = self.db.get_setting("active_project_name", "")
                 if not current_active or current_active == "autoscaleops-app":
                     self.db.set_active_project(name)
-                # DB settings güncelle (ngrok ve port-forward doğru portu okusun)
                 self.db.set_setting("active_project_port",    str(port))
                 self.db.set_setting("active_project_name",    name)
                 self.db.set_setting("active_project_service", f"{name}-service")
-                # Dashboard JSON güncelle — hemen yeni projeyi görsün
                 _write_active_project_json(name, port, f"{name}-service")
-                # Port-forward'ları yeni servise yönlendir
                 instance = self.ops.get_instance()
-                ns = instance.get("namespace", f"autoscaleops-{instance.get('instance_id','')}")
+                ns = instance.get("namespace", "autoscaleops")
                 self.ops.stop_port_forwards()
                 self.ops.start_port_forwards(ns)
-                # Başarı banner
-                self._success_name_lbl.setText(f"{name} başarıyla deploy edildi!")
-                self._success_url_lbl.setText(
-                    f"Adres: http://localhost:{port}  •  Ana Sayfa'dan Başlat'a basarak erişebilirsiniz."
-                )
-                self._success_banner.setVisible(True)
-            else:
-                self._deploy_log.append_line(
-                    f"\n❌  Deploy başarısız: {msg}", "error"
-                )
+            # Sonucu main thread'e sinyal ile ilet
+            self._deploy_done.emit(ok, msg, name, folder, port)
 
         threading.Thread(target=do, daemon=True).start()
+
+    @pyqtSlot(bool, str, str, str, int)
+    def _on_deploy_finished(self, ok: bool, msg: str, name: str, folder: str, port: int):
+        """Deploy worker'ından gelen sonucu main thread'de işler."""
+        self._btn_deploy.setEnabled(True)
+        if ok:
+            self._refresh_project_list()
+            self._success_name_lbl.setText(f"{name} basariyla deploy edildi!")
+            self._success_url_lbl.setText(
+                f"Adres: http://localhost:{port}  •  Ana Sayfa'dan Baslat'a basarak erisebilirsiniz."
+            )
+            self._success_banner.setVisible(True)
+            self._help_panel.setVisible(False)
+        else:
+            self._deploy_log.append_line(f"\n Deploy basarisiz: {msg}", "error")
+            self._show_deploy_help(msg)
 
     def _start_redeploy(self):
         image    = self._upd_image.text().strip()
@@ -9362,6 +10114,117 @@ class DeployPanel(QWidget):
                 self._upd_replicas.setValue(int(out2.strip()))
             except Exception:
                 pass
+
+    # ─── Deploy Yardımcısı ──────────────────────────────────────────────────
+
+    # Hata pattern → (kategori, adımlar, kopyalanacak komut)
+    _DEPLOY_ERRORS = [
+        (
+            ["invalid tag", "invalid reference format", "unicode", "turkce", "special char"],
+            "Hata: Türkçe/Özel Karakterli Proje Adı",
+            "Docker image tag sadece küçük harf, rakam ve tire içerebilir.\n"
+            "Çözüm: Proje Adı alanına yalnızca İngilizce karakter girin (örn: 'yeni-klasor').\n"
+            "Uygulama artık bunu otomatik dönüştürüyor — klasörü yeniden seçin.",
+            ""
+        ),
+        (
+            ["docker desktop", "docker daemon", "error during connect", "docker is not running",
+             "docker baslatilam", "docker kapal"],
+            "Hata: Docker Desktop Kapalı",
+            "Docker Desktop arka planda çalışmıyor.\n"
+            "1. Sistem tepsisinde Docker balina ikonunu arayın.\n"
+            "2. Yoksa Docker Desktop'u manuel başlatın.\n"
+            "3. Balina ikonu yeşil olunca tekrar deneyin.",
+            "& 'C:\\Program Files\\Docker\\Docker\\Docker Desktop.exe'"
+        ),
+        (
+            ["minikube", "cluster", "not running", "connection refused", "no server"],
+            "Hata: Kubernetes Cluster Çalışmıyor",
+            "Minikube cluster'ı başlatılmamış veya kapanmış.\n"
+            "1. Ana Sayfa'dan 'Cluster Başlat' butonuna tıklayın.\n"
+            "2. Cluster hazır olduktan sonra deploy'u tekrar çalıştırın.",
+            "minikube start -p autoscaleops --driver=docker"
+        ),
+        (
+            ["port is already allocated", "port bind", "address already in use"],
+            "Hata: Port Kullanımda",
+            "Belirttiğiniz port başka bir uygulama tarafından kullanılıyor.\n"
+            "1. Farklı bir port numarası deneyin (örn: 8081, 3000, 5000).\n"
+            "2. Veya aşağıdaki komutla hangi process kullandığını bulun:",
+            "netstat -ano | findstr :8080"
+        ),
+        (
+            ["image not found", "manifest unknown", "repository does not exist", "not found"],
+            "Hata: Docker Image Bulunamadı",
+            "Build edilen image Kubernetes'in Docker ortamına aktarılamadı.\n"
+            "1. Minikube docker-env aktif değilse image görünmez.\n"
+            "2. Deploy'u tekrar başlatın — otomatik düzeltilmesi gerekir.\n"
+            "3. Sorun devam ederse cluster'ı yeniden başlatın.",
+            "& minikube -p autoscaleops docker-env --shell powershell | Invoke-Expression"
+        ),
+        (
+            ["oomkilled", "out of memory", "memory limit", "evicted"],
+            "Hata: Bellek Yetersiz",
+            "Kubernetes pod'u bellek sınırı nedeniyle sonlandırıldı.\n"
+            "1. Minikube'a daha fazla RAM ayırın (varsayılan: 6 GB).\n"
+            "2. Uygulamanızın bellek kullanımını optimize edin.",
+            "minikube start -p autoscaleops --driver=docker --memory=8192"
+        ),
+        (
+            ["helm", "chart", "release", "already exists"],
+            "Hata: Helm Release Çakışması",
+            "Aynı isimde bir Helm release zaten mevcut.\n"
+            "1. Projeyi farklı bir adla deploy edin.\n"
+            "2. Veya mevcut release'i silip tekrar deneyin:",
+            "helm uninstall <proje-adi> -n autoscaleops"
+        ),
+        (
+            ["timeout", "timed out", "deadline exceeded", "rollout"],
+            "Hata: Pod Hazır Olmadı (Timeout)",
+            "Pod'lar belirtilen sürede ayağa kalkmadı.\n"
+            "1. Uygulama başlatma süreniz 3 dakikayı aşıyor olabilir.\n"
+            "2. Pod loglarına bakarak asıl hatayı bulun:",
+            "kubectl logs -l app=<proje-adi> -n autoscaleops --tail=50"
+        ),
+        (
+            ["dockerfile", "no such file", "not found in context", "unable to prepare context"],
+            "Hata: Dockerfile Oluşturulamadı",
+            "Uygulama Dockerfile'ı oluşturamadı veya okuyamadı.\n"
+            "1. Klasörde geçerli bir requirements.txt, package.json veya index.html var mı?\n"
+            "2. Klasöre yazma iznin var mı?\n"
+            "3. Farklı bir klasör seçin.",
+            ""
+        ),
+    ]
+
+    def _show_deploy_help(self, error_msg: str):
+        """Hata metnini analiz et, uygun yardım kartını göster."""
+        if not hasattr(self, '_help_panel'):
+            return
+        err_lower = error_msg.lower()
+        matched = None
+        for patterns, category, steps, cmd in self._DEPLOY_ERRORS:
+            if any(p in err_lower for p in patterns):
+                matched = (category, steps, cmd)
+                break
+        if matched is None:
+            matched = (
+                "Bilinmeyen Hata",
+                "Bu hata otomatik tanınamadı.\n"
+                "1. Deploy günlüğündeki kırmızı satırı kopyalayıp aratın.\n"
+                "2. Cluster ve Docker Desktop'un çalıştığından emin olun.\n"
+                "3. Sorunu çözemezseniz günlüğü paylaşarak destek isteyin.",
+                "kubectl get events -n autoscaleops --sort-by=.lastTimestamp"
+            )
+        category, steps, cmd = matched
+        self._help_category.setText(f"Tespit: {category}")
+        self._help_steps.setText(steps)
+        if cmd:
+            self._help_cmd_lbl.setText(cmd)
+            self._help_cmd.setVisible(True)
+        else:
+            self._help_cmd.setVisible(False)
+        self._help_panel.setVisible(True)
 
 
 # ─────────────────────────────────────────────

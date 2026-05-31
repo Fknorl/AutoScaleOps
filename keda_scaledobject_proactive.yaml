@@ -1,0 +1,19 @@
+apiVersion: keda.sh/v1alpha1
+kind: ScaledObject
+metadata:
+  name: yeni-klasor-scaledobject
+  namespace: autoscaleops
+spec:
+  scaleTargetRef:
+    name: yeni-klasor-deployment
+  minReplicaCount: 1
+  maxReplicaCount: 10
+  pollingInterval: 15
+  cooldownPeriod: 60
+  triggers:
+    - type: prometheus
+      metadata:
+        serverAddress: http://prometheus-kube-prometheus-prometheus.monitoring.svc.cluster.local:9090
+        metricName: predicted_rps_30min
+        query: predicted_rps_30min
+        threshold: "50"

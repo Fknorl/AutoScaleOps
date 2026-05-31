@@ -1,8 +1,10 @@
 import time
+import json
 import requests
 import os
 import pandas as pd
 import numpy as np
+from datetime import datetime, timedelta
 from prometheus_client import CollectorRegistry, Gauge, push_to_gateway
 from pmdarima import auto_arima
 from statsmodels.tsa.stattools import adfuller
@@ -12,12 +14,23 @@ warnings.filterwarnings("ignore")
 
 # ── Ayarlar ──────────────────────────────────────────────────────────────────
 PROMETHEUS_URL         = os.getenv("PROMETHEUS_URL",         "http://127.0.0.1:9090")
-PUSHGATEWAY_URL        = os.getenv("PUSHGATEWAY_URL",        "http://127.0.0.1:51090")
+PUSHGATEWAY_URL        = os.getenv("PUSHGATEWAY_URL",        "http://127.0.0.1:9091")
 POD_CAPACITY_THRESHOLD = int(os.getenv("POD_CAPACITY_THRESHOLD", "100"))
 SAFETY_BUFFER_PODS     = int(os.getenv("SAFETY_BUFFER_PODS",     "2"))
 FALSE_ALARM_TIMEOUT    = int(os.getenv("FALSE_ALARM_TIMEOUT",    "300"))
-FORECAST_HORIZON       = int(os.getenv("FORECAST_HORIZON",       "5"))   # tahmin ufku (dakika)
+FORECAST_HORIZON       = int(os.getenv("FORECAST_HORIZON",       "30"))  # tahmin ufku (dakika) — 5→30
 CI_LEVEL               = float(os.getenv("CI_LEVEL",             "0.95")) # güven aralığı seviyesi
+
+# Profil yolu: önce local (Windows dev), sonra K8s pod yolu
+# Windows: %USERPROFILE%\.autoscaleops\domain_profile.json
+# K8s pod: /config/profile.json
+_LOCAL_PROFILE = os.path.join(
+    os.path.expanduser("~"), ".autoscaleops", "domain_profile.json"
+)
+DOMAIN_PROFILE_PATH = os.getenv(
+    "DOMAIN_PROFILE_PATH",
+    _LOCAL_PROFILE if os.path.exists(_LOCAL_PROFILE) else "/config/profile.json"
+)
 
 # ── Generic metric desteği ────────────────────────────────────────────────────
 # Kullanıcı kendi Prometheus metriğini autoscaleops.yaml'da tanımlar.
@@ -59,13 +72,14 @@ g_data_points = Gauge('arima_training_data_points',
                       'Son egitimde kullanilan veri noktasi sayisi',
                       registry=registry)
 
-print("🧠 Yapay Zeka (Auto-ARIMA) Başlatılıyor...")
+print("🧠 Yapay Zeka (Auto-SARIMA + Domain Profile) Baslatiliyor...")
 print(f"🔗 Prometheus:       {PROMETHEUS_URL}")
 print(f"🔗 Pushgateway:      {PUSHGATEWAY_URL}")
 print(f"📡 Kaynak Metrik:    {SOURCE_METRIC}")
 print(f"📤 Tahmin Metrik:    {PREDICTION_METRIC}")
 print(f"📡 Tahmin Ufku:      {FORECAST_HORIZON} dakika")
 print(f"📊 Güven Aralığı:    %{int(CI_LEVEL*100)}")
+print(f"📁 Domain Profil:    {DOMAIN_PROFILE_PATH}")
 
 # Sabit metrikleri ayarla
 g_forecast_horizon.set(FORECAST_HORIZON)
@@ -138,6 +152,62 @@ def get_current_rps():
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# DOMAIN PROFİL
+# ─────────────────────────────────────────────────────────────────────────────
+_profile_cache      = None
+_profile_loaded_at  = 0.0
+PROFILE_TTL         = 60.0  # saniyede bir yeniden oku
+
+def load_domain_profile() -> dict:
+    """profile.json'u okur; eksikse düz 1.0 profil döner."""
+    global _profile_cache, _profile_loaded_at
+    now = time.time()
+    if _profile_cache is not None and (now - _profile_loaded_at) < PROFILE_TTL:
+        return _profile_cache
+    try:
+        with open(DOMAIN_PROFILE_PATH, "r") as f:
+            _profile_cache = json.load(f)
+        _profile_loaded_at = now
+        print(f"📂 Domain profil yuklendi: {DOMAIN_PROFILE_PATH}")
+    except FileNotFoundError:
+        _profile_cache = {"hours": {str(h): 1.0 for h in range(24)}, "events": []}
+    except Exception as e:
+        print(f"⚠️ Profil okuma hatasi: {e} — Duz profil kullaniliyor.")
+        _profile_cache = {"hours": {str(h): 1.0 for h in range(24)}, "events": []}
+    return _profile_cache
+
+
+def get_profile_multiplier(forecast_horizon_min: int) -> float:
+    """Tahmin anının saat dilimine göre profil ağırlığını döner."""
+    profile   = load_domain_profile()
+    target_dt = datetime.now() + timedelta(minutes=forecast_horizon_min)
+    hour_key  = str(target_dt.hour)
+    return float(profile.get("hours", {}).get(hour_key, 1.0))
+
+
+def get_event_margin(forecast_horizon_min: int) -> float:
+    """Yaklaşan bir etkinlik varsa güvenlik marjını döner, yoksa 0.0."""
+    profile = load_domain_profile()
+    events  = profile.get("events", [])
+    if not events:
+        return 0.0
+    now        = datetime.now()
+    lookahead  = now + timedelta(minutes=forecast_horizon_min)
+    for ev in events:
+        try:
+            ev_dt = datetime.fromisoformat(ev["date"])
+            delta = (ev_dt - now).total_seconds()
+            # Etkinlik 0-120 dakika içindeyse marjı uygula
+            if 0 <= delta <= 7200 or (ev_dt.date() == lookahead.date()):
+                margin = float(ev.get("margin", 0.3))
+                print(f"📅 Etkinlik yaklasıyor: '{ev.get('name','')}' → +%{int(margin*100)} marj")
+                return margin
+        except Exception:
+            continue
+    return 0.0
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # EMA FALLBACK (az veri durumunda)
 # ─────────────────────────────────────────────────────────────────────────────
 def ema_fallback(history, current_rps, alpha=0.3):
@@ -177,13 +247,17 @@ def train_model(history, force=False):
         except Exception:
             pass
 
-        # Auto-ARIMA model seçimi
+        # Auto-SARIMA model seçimi (m=60: saatlik periyot, dakikalık veri)
+        # seasonal=True + m=60 ile intra-hour örüntüler yakalanır
         _model = auto_arima(
             history,
-            seasonal=False,
+            seasonal=True,
+            m=60,
             stepwise=True,
             error_action='ignore',
-            suppress_warnings=True
+            suppress_warnings=True,
+            max_p=3, max_q=3, max_P=2, max_Q=2,
+            information_criterion='bic'
         )
 
         p, d, q = _model.order
@@ -261,9 +335,15 @@ while True:
         if ai_prediction < 0:
             ai_prediction = 0.0
 
+        # Domain profil ağırlığı + etkinlik marjı uygula
+        hour_weight   = get_profile_multiplier(FORECAST_HORIZON)
+        event_margin  = get_event_margin(FORECAST_HORIZON)
+        ai_prediction = ai_prediction * hour_weight * (1.0 + event_margin)
+
         print(f"🔮 Nokta: {ai_pred_raw:.2f} | "
               f"%{int(CI_LEVEL*100)} GA: [{min(lower_ci):.2f}, {max(upper_ci):.2f}] | "
-              f"Kullanılan: {ai_prediction:.2f}")
+              f"Profil x{hour_weight:.2f} | Etkinlik +%{int(event_margin*100)} | "
+              f"Kullanilan: {ai_prediction:.2f}")
 
     except Exception as e:
         print(f"⚠️ Model hatası: {e} — Gerçek RPS kullanılıyor.")
