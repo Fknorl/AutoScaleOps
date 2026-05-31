@@ -301,17 +301,9 @@ plt.tight_layout()
 plt.savefig(SAVE_DIR / "fig3_acf_pacf.png", bbox_inches="tight", dpi=200)
 plt.show()
 
-# ── SARIMA order — ACF/PACF'den gözlemsel belirleme
-#   PACF lag-1 kesimi → p = 1
-#   ACF lag-1 kesimi  → q = 1
-#   PACF lag-24 anlamlıysa → P = 1
-#   ACF  lag-24 anlamlıysa → Q = 1
-#   Mevsimsel fark: D = 1 (mevsimselliği kaldırmak için)
-SARIMA_ORDER         = (1, D_ORDER, 1)
-SARIMA_SEASONAL      = (1, 1, 1, 24)
-
-print(f"Seçilen SARIMA order         : {SARIMA_ORDER}")
-print(f"Seçilen SARIMA seasonal order: {SARIMA_SEASONAL}")
+# ACF/PACF grafikleri parametre seçimini görsel olarak destekler.
+# SARIMA için otomatik parametre seçimi kullanılacak (ARIMA ile tutarlı).
+# Detaylar Hücre 7'de.
 print("Kaydedildi: fig3_acf_pacf.png ✓")
 
 
@@ -360,19 +352,33 @@ def predict_arima(model, horizons: list[int]) -> dict:
 
 
 # ──────────────────────────────────────────────
-#  SARIMA  (Online, mevsimsel)
+#  SARIMA  (Online, mevsimsel — ARIMA ile tutarlı auto seçim)
+#
+#  Metodoloji notu:
+#    ARIMA ile tutarlılık için SARIMA da her fold'da otomatik
+#    parametre seçimi yapar. Arama uzayı kısıtlanarak (~15-25s/fold)
+#    makul sürede tamamlanır.
+#    Bu yaklaşım her iki modeli de aynı prensiple değerlendirir.
 # ──────────────────────────────────────────────
 def fit_sarima(train: np.ndarray) -> object | None:
     try:
-        from statsmodels.tsa.statespace.sarimax import SARIMAX
-        m = SARIMAX(
+        from pmdarima import auto_arima
+        model = auto_arima(
             train,
-            order=SARIMA_ORDER,
-            seasonal_order=SARIMA_SEASONAL,
-            enforce_stationarity=False,
-            enforce_invertibility=False,
+            d=D_ORDER,
+            seasonal=True,
+            m=24,                    # günlük mevsimsellik
+            D=1,                     # mevsimsel fark sabit (kararlılık için)
+            max_p=2, max_q=2,        # kısa vadeli bileşen arama uzayı
+            max_P=1, max_Q=1,        # mevsimsel bileşen arama uzayı
+            start_p=0, start_q=0,
+            start_P=0, start_Q=0,
+            stepwise=True,           # grid değil akıllı arama (~15-25s)
+            error_action="ignore",
+            suppress_warnings=True,
+            information_criterion="aic",
         )
-        return m.fit(disp=False, maxiter=80, method="lbfgs")
+        return model
     except Exception:
         return None
 
@@ -381,7 +387,7 @@ def predict_sarima(model, horizons: list[int]) -> dict:
         return {}
     try:
         max_h = max(horizons)
-        fc    = np.maximum(0, model.forecast(max_h))
+        fc    = np.maximum(0, model.predict(n_periods=max_h))
         return {h: float(fc[h - 1]) for h in horizons}
     except Exception:
         return {}
@@ -820,7 +826,7 @@ lstm_row = {
 df_op = pd.DataFrame([
     {"Model": "EMA",        "Kategori": "Online",  "Fit_ms": "< 1",    "Inf_ms": "< 1",  "Eğitim_Gereksinimi": "Yok",        "Gerçek_Zamanlı": "Evet"},
     {"Model": "ARIMA",      "Kategori": "Online",  "Fit_ms": "~7000",  "Inf_ms": "< 10", "Eğitim_Gereksinimi": "Her tahmin",  "Gerçek_Zamanlı": "Sınırda (30s döngü)"},
-    {"Model": "SARIMA",     "Kategori": "Online",  "Fit_ms": "~5000",  "Inf_ms": "< 10", "Eğitim_Gereksinimi": "Her tahmin",  "Gerçek_Zamanlı": "Sınırda"},
+    {"Model": "SARIMA",     "Kategori": "Online",  "Fit_ms": "~20000", "Inf_ms": "< 10", "Eğitim_Gereksinimi": "Her tahmin",  "Gerçek_Zamanlı": "Sınırda"},
     {"Model": "HoltWinters","Kategori": "Online",  "Fit_ms": "~500",   "Inf_ms": "< 1",  "Eğitim_Gereksinimi": "Her tahmin",  "Gerçek_Zamanlı": "Evet"},
     {"Model": "Prophet",    "Kategori": "Online",  "Fit_ms": "~5000",  "Inf_ms": "< 10", "Eğitim_Gereksinimi": "Her tahmin",  "Gerçek_Zamanlı": "Evet"},
     {"Model": "LSTM",       "Kategori": "Offline", "Fit_ms": f"{LSTM_TRAIN_TIME_S*1000:.0f} (bir kez)", "Inf_ms": "< 1", "Eğitim_Gereksinimi": "Offline (periyodik)", "Gerçek_Zamanlı": "Evet"},
