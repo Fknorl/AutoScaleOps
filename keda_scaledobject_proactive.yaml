@@ -11,9 +11,21 @@ spec:
   pollingInterval: 15
   cooldownPeriod: 60
   triggers:
+    # Trigger 1 — Proaktif: ARIMA tahminini izle
+    # Beklenen trafik artışlarında önceden pod açar
     - type: prometheus
       metadata:
         serverAddress: http://prometheus-kube-prometheus-prometheus.monitoring.svc.cluster.local:9090
         metricName: predicted_rps_30min
         query: predicted_rps_30min
+        threshold: "50"
+
+    # Trigger 2 — Reaktif: Gerçek anlık trafiği izle
+    # Tahmin edilemeyen ani spike'larda devreye girer
+    # KEDA iki trigger'dan büyük olanı seçer
+    - type: prometheus
+      metadata:
+        serverAddress: http://prometheus-kube-prometheus-prometheus.monitoring.svc.cluster.local:9090
+        metricName: http_requests_total_actual
+        query: sum(rate(http_requests_total{kubernetes_pod_name=~"yeni-klasor-.*"}[2m]))
         threshold: "50"
