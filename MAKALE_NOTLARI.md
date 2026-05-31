@@ -1,12 +1,11 @@
-# AutoScaleOps — Makale Notları (Devam Edilecek)
+# AutoScaleOps — Makale Notları (Güncel)
 
-## Mevcut Durum
+## Mevcut Dosyalar
 - Word dosyası: `C:\Users\furka\Desktop\AutoScaleOps_Makale.docx`
-- Model karşılaştırması tamamlandı (Colab sonuçları hazır)
-- Sonuçlar: `C:\Users\furka\Desktop\AutoScaleOps_Akademik\`
+- Model karşılaştırması: `C:\Users\furka\Desktop\AutoScaleOps_Akademik\`
+- Makale notları: bu dosya
 
-## Makale Başlığı (Geçici)
-"AutoScaleOps: Zaman Serisi Tahminine Dayalı Proaktif Kubernetes Otomatik Ölçekleme Sistemi"
+---
 
 ## Model Karşılaştırması Sonuçları (Kesinleşmiş)
 
@@ -23,55 +22,153 @@
 † Çıkarım süresi; eğitim: 7.58s (bir kez, offline)
 
 ### D-M Testi (24 saatlik ufuk)
-- EMA vs tüm gelişmiş modeller: p≈0 (ANLAMLI)
-- Gelişmiş modeller arası: p>0.14 (ANLAMSIZ)
-- Yorum: Tüm gelişmiş modeller EMA'dan iyi ama birbirinden istatistiksel olarak farklı değil
+- EMA vs tüm gelişmiş modeller: p≈0 (ANLAMLI) — gelişmiş model şart
+- Gelişmiş modeller arası: p>0.14 (ANLAMSIZ) — fark istatistiksel değil
+- **Sonuç:** Model seçiminde hesaplama verimliliği belirleyici kriter olmalı
 
-## Makale Yapısı (Planlandı)
+---
 
-### Bölüm 5 — AutoScaleOps Sistemi (Yeniden Yazılacak)
-5.1 Sistem Mimarisi  
-5.2 Proaktif Tahmin Motoru  
-5.3 KEDA Entegrasyonu  
-5.4 Yönetim Arayüzü  
-5.5 AI Profil Paneli (EN ÖNEMLİ — özgün katkı)
+## Makale Yapısı — Bölüm 5 Güncellenmiş Plan
 
-### Eklenecek Figürler
-- Şekil 1: fig2_decomposition.png → Bölüm 3.1 sonrası
-- Şekil 2: fig4_mape_comparison.png → Bölüm 4.1 sonrası
-- Şekil 3: fig5_tradeoff.png → Bölüm 4.3 sonrası
-- Şekil 4: fig6_best_forecast.png → Bölüm 5 sonrası (isteğe bağlı)
+### 5.1 Sistem Mimarisi
+Genel bileşen diyagramı:
+```
+[AI Profil Paneli] → [domain_profile.json] → [predictor.py]
+[Prometheus]       → [predictor.py] → [Pushgateway] → [Prometheus]
+[Prometheus]       → [KEDA] → [Kubernetes Deployment]
+```
 
-## Açık Kalan Tartışma Noktaları
+### 5.2 Proaktif Tahmin Motoru (predictor.py)
+**Makaleye yazılacak teknik detaylar:**
+- Veri penceresi: son 240 dakika (4 saat), 1 dakikalık çözünürlük
+- IQR yöntemiyle outlier temizleme
+- Auto-SARIMA: m=60 (saatlik periyot, dakikalık veri), BIC kriteri
+- Tahmin: nokta tahmini değil, **%95 güven aralığı üst sınırı** kullanılır
+  → Muhafazakâr yaklaşım: gerçek spike'ı kaçırmamak için kasıtlı yüksek tahmin
+- Tahmin döngüsü: her 60 saniye
+- FORECAST_HORIZON: 30 dakika (pod startup ~30-60sn göz önüne alındığında proaktif)
+- Fallback: <15 veri noktasında EMA kullanılır
 
-### 1. ARIMA 44× Yavaş Sorunu
-Makaleye eklenecek savunma:
-- ARIMA 24h ufukta en iyi (ufuk bazlı seçim gerekçesi)
-- 7.5s → 30-60s döngüde kabul edilebilir
-- Holt-Winters gelecek çalışmada değerlendirilecek
+### 5.3 Hibrit KEDA Ölçekleme Mimarisi ⭐ (EN ÖNEMLİ YENİ KATKI)
+**Bu kısım makalede ayrıca vurgulanmalı:**
 
-### 2. KRİTİK — ARIMA 120 Nokta Sorunu (ÇÖZÜLMEDEN MAKALE YAZILMAZ)
-- Uygulama son 120 veri noktasına (~10-14 dk) bakıyor
-- Bu kadar kısa geçmişle ARIMA haftalık/günlük örüntü öğrenemiyor
-- AI Profil Paneli bu boşluğu kapatıyor (hibrit mimari)
-- AMA: Uygulamada ARIMA prediction loop gerçekten çalışıyor mu?
-- ARIMA predicted_rps_30min'i kim üretiyor? (uygulama mı, dış script mi?)
+İki tetikleyici stratejisi:
+```yaml
+Trigger 1 (Proaktif):  predicted_rps_30min  ← ARIMA tahmini
+Trigger 2 (Reaktif):   actual_rps           ← anlık Prometheus metriği
+KEDA: max(Trigger1, Trigger2) → pod kararı
+```
 
-### 3. Sistem Gerçekten Çalışıyor mu?
-- Spike testinde predicted_rps_30min = boş sonuç (Prometheus'ta yok)
-- /metrics endpoint yok (app Prometheus'a metrik yazmıyor)
-- KEDA metriki hiç gelmedi → aktif olmadı
-- Sonuç: Sistem proaktif ölçekleme YAPMIYOR olabilir
+**Üç senaryo:**
 
-## Sıradaki Adım
-Uygulamaya dön:
-1. ARIMA prediction loop nerede? (kod inceleme)
-2. predicted_rps_30min kim üretiyor?
-3. KEDA gerçekten tahmine göre mi yoksa anlık RPS'e göre mi ölçekleniyor?
-4. Mantıksal hatalar varsa düzelt
-5. Sonra makaleye dön
+| Senaryo | ARIMA Tahmini | Gerçek RPS | KEDA Kararı | Sonuç |
+|---------|--------------|------------|-------------|-------|
+| Beklenen spike | 200 RPS | 40 RPS | 4 pod | ✅ Proaktif |
+| Beklenmedik spike | 20 RPS | 150 RPS | 3 pod | ✅ Reaktif güvenlik |
+| Normal trafik | 40 RPS | 38 RPS | 1 pod | ✅ Verimli |
 
-## Veri Dosyaları
-- Model karşılaştırması: `AutoScaleOps_Akademik/model_comparison_results.csv`
-- D-M testi: `AutoScaleOps_Akademik/dm_test_results.csv`
-- Wikipedia ham veri: `AutoScaleOps_Akademik/wikipedia_hourly_raw.csv`
+**Makaleye yazılacak metin (taslak):**
+> "Sistemimiz iki katmanlı ölçekleme stratejisi benimser: ARIMA tabanlı proaktif
+> tetikleyici beklenen trafik örüntüleri için kapasiteyi önceden hazırlarken,
+> anlık metrik tabanlı reaktif tetikleyici öngörülemeyen ani artışlara karşı
+> güvenlik ağı oluşturur. KEDA her iki tetikleyiciden yüksek olanını seçerek
+> ne proaktif avantajı ne de reaktif güvenliği feda etmez."
+
+**Neden güçlü:** Sadece tahmin kullanan sistemler beklenmedik spike'larda başarısız olur.
+Sadece reaktif kullanan sistemler spike ANında geç kalır. İkisini birleştirmek
+her iki problemi de çözer.
+
+### 5.4 Domain Bilgisi Entegrasyonu (AI Profil Paneli)
+**Neden gerekli — makaleye yazılacak:**
+> "SARIMA modeli 4 saatlik veri penceresiyle günlük/haftalık trafik
+> örüntülerini öğrenemez. Bu sınırlamayı aşmak için AI Profil Paneli
+> domain bilgisini sisteme entegre eder."
+
+Entegrasyon mekanizması:
+1. Kullanıcı saatlik ağırlık profili girer (0.1-3.0 çarpanı, 24 slot)
+2. "Kubernetes'e Gönder" → `~/.autoscaleops/domain_profile.json` yazılır
+3. predictor.py her 60sn dosyayı yeniden okur
+4. Tahmin formülü: `final = ARIMA_pred × hour_weight × (1 + event_margin)`
+5. Etkinlik takvimi: yaklaşan 2 saat içindeki etkinlik güvenlik marjı ekler
+
+**Örnek:**
+```
+Saat 14:00 profil ağırlığı = 2.5
+ARIMA ham tahmini = 40 RPS
+Kampanya etkinliği = +%30 marj
+Final tahmin = 40 × 2.5 × 1.30 = 130 RPS → KEDA 3 pod açar
+```
+
+### 5.5 Yönetim Arayüzü
+- PyQt6, 7 panel
+- Dashboard, Aktivite Logu, Sorun Giderici, Ayarlar, Deploy, AI Profil
+- TR/EN dil desteği
+- Proaktif scaling durumu, anlık metrikler, pod sayısı gösterimi
+
+---
+
+## Makaleye Eklenmesi Gereken Yeni İçerikler
+
+### 1. Bölüm 1 (Giriş) — Eklenecek
+Reaktif sistemlerin iki temel problemi:
+- Cold-start gecikmesi (pod başlatma ~30-60 sn)
+- Spike anında kullanıcı latency artışı (p95/p99)
+Proaktif sistemlerin dezavantajı:
+- Tahmin edilemeyen spike'larda başarısız olabilir (bu çalışmada hibrit mimari ile çözüldü)
+
+### 2. Bölüm 3 (Metodoloji) — Eklenecek
+Walk-forward CV sezgisel açıklaması:
+> "Model, her gün sabahleyin önceki 30 günün verisine bakarak bugünü
+> tahmin etmeye çalışır. Doğru tahmin ettikten sonra bir gün ileri kayar
+> ve bu 61 kez tekrar eder."
+
+### 3. Bölüm 5 (AutoScaleOps) — Tamamen Yeniden Yazılacak
+Yukarıdaki 5.1-5.5 yapısına göre.
+
+### 4. Bölüm 6 (Tartışma) — Eklenecek
+**ARIMA seçimi savunması:**
+> "ARIMA'nın 24 saatlik ufukta en yüksek doğruluğu (%4.61 MAPE) elde
+> etmesi seçimini desteklemektedir. Holt-Winters istatistiksel olarak
+> eşdeğer doğruluk sunarken 44× daha hızlı çalışsa da, ARIMA'nın
+> 7.45 saniyelik tahmin süresi 30-60 saniyelik KEDA polling döngüsünde
+> kabul edilebilir kalmaktadır."
+
+**4 saatlik pencere sınırlılığı:**
+> "4 saatlik veri penceresi günlük/haftalık trafik döngülerini
+> öğrenmek için yeterli değildir. Bu sınırlılık AI Profil Paneli
+> üzerinden sağlanan domain bilgisi ile giderilmiş; sistem hibrit
+> bir tahmin yaklaşımı benimsemiştir."
+
+---
+
+## Eklenecek Figürler
+
+| Figür | Dosya | Bölüm |
+|-------|-------|-------|
+| Şekil 1: Veri ayrıştırması | fig2_decomposition.png | 3.1 sonrası |
+| Şekil 2: MAPE karşılaştırması | fig4_mape_comparison.png | 4.1 sonrası |
+| Şekil 3: Hız-doğruluk dengesi | fig5_tradeoff.png | 4.3 sonrası |
+| Şekil 4: Sistem akış diyagramı | (çizilecek) | 5.1 |
+
+---
+
+## Düzeltilen Teknik Sorunlar (Kod)
+
+| Sorun | Düzeltme |
+|-------|---------|
+| KEDA sadece tahmini görüyordu, spike kaçıyor | Çift trigger: tahmin + gerçek RPS |
+| Profil paneli predictor'a ulaşmıyordu | local domain_profile.json yazılıyor |
+| FORECAST_HORIZON 5dk (çok kısa) | 30 dakikaya çıkarıldı |
+| Pushgateway 51090 yanlış port | 9091 düzeltildi |
+| predictor.py manuel başlatılıyordu | App açılınca otomatik başlar |
+
+---
+
+## Sıradaki Adımlar
+
+1. [ ] KEDA güncelle: `kubectl apply -f keda_scaledobject_proactive.yaml`
+2. [ ] Pushgateway port forward aç
+3. [ ] predictor.py test et
+4. [ ] Word makalesini güncelle (Bölüm 5 yeniden yaz)
+5. [ ] Figürleri ekle
+6. [ ] ARIMA seçim savunmasını ekle
