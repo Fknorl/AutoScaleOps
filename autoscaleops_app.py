@@ -885,6 +885,12 @@ class AppDatabase:
                     safety_margin REAL DEFAULT 0.3,
                     notes TEXT DEFAULT ''
                 );
+                CREATE TABLE IF NOT EXISTS hourly_rps_history (
+                    date  TEXT NOT NULL,
+                    hour  INTEGER NOT NULL,
+                    avg_rps REAL NOT NULL,
+                    PRIMARY KEY (date, hour)
+                );
             """)
             self._ensure_default_profile()
             self._ensure_default_project()
@@ -1151,6 +1157,28 @@ class AppDatabase:
             "events": [{"name": e["name"], "date": e["event_date"],
                         "margin": e["safety_margin"]} for e in events]
         }
+
+    # ── Saatlik RPS Geçmişi ─────────────────────────────────────────────────
+    def save_hourly_rps(self, date_str: str, hour: int, avg_rps: float) -> None:
+        """Prometheus'tan çekilen saatlik RPS ortalamasını DB'ye kaydeder."""
+        with self._lock:
+            self.conn.execute(
+                "INSERT OR REPLACE INTO hourly_rps_history (date, hour, avg_rps) VALUES (?,?,?)",
+                (date_str, hour, round(avg_rps, 4))
+            )
+            self.conn.commit()
+
+    def get_hourly_rps_history(self, days: int = 7) -> dict:
+        """Son N günün saatlik RPS ortalamalarını döner: {hour: avg_rps}"""
+        import datetime as _dt
+        cutoff = (_dt.date.today() - _dt.timedelta(days=days)).isoformat()
+        with self._lock:
+            cur = self.conn.execute(
+                "SELECT hour, AVG(avg_rps) FROM hourly_rps_history "
+                "WHERE date >= ? GROUP BY hour ORDER BY hour",
+                (cutoff,)
+            )
+            return {row[0]: row[1] for row in cur.fetchall()}
 
     # ── Proje Yönetimi ──────────────────────────────────────────────────────
 
@@ -8890,12 +8918,15 @@ class AiProfilePanel(QWidget):
         self.db  = db
         self.ops = ops
         self._live_rps: dict[int, float] = {}   # saat → ortalama RPS (Prom'dan)
-        self._hist_rps: dict[int, float] = {}   # saat → 30 günlük ort. (Prom'dan)
+        self._hist_rps: dict[int, float] = {}   # saat → 7 günlük ort. (DB + Prom)
         self._build_ui()
+        # DB'deki geçmiş veriyi hemen yükle (Prometheus açık olmasa bile çalışır)
+        QTimer.singleShot(500,  self._load_history_from_db)
+        # Prometheus'tan canlı + bugünkü veriyi çek
+        QTimer.singleShot(1500, self._refresh_live)
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._refresh_live)
-        self._timer.start(30000)
-        QTimer.singleShot(1500, self._refresh_live)
+        self._timer.start(30000)   # Her 30 saniyede güncelle
 
     # ── UI ─────────────────────────────────────────────────────────────────
     def _build_ui(self):
@@ -9152,9 +9183,21 @@ class AiProfilePanel(QWidget):
 
     # ── Canlı veri çekme ────────────────────────────────────────────────────
     def _refresh_live(self):
+        """
+        İki sorgu yapar:
+        1. Anlık RPS → şu anki saatin yeşil barını günceller
+        2. Bugünün saatlik ortalamaları → sarı geçmiş çizgisini doldurur
+           (Prometheus'ta gün başından beri veri varsa çalışır)
+        """
+        import threading
+        threading.Thread(target=self._fetch_data_bg, daemon=True).start()
+
+    def _fetch_data_bg(self):
+        """Arka planda Prometheus'tan hem anlık hem geçmiş veriyi çeker."""
         try:
-            import requests as _req
-            # Son 1 saatin RPS'ini saat bazında grupla
+            import requests as _req, time as _time, datetime as _dt
+
+            # ── 1. Anlık RPS (son 5 dk) ──────────────────────────────────
             resp = _req.get(
                 self.PROM_URL,
                 params={"query": "sum(rate(http_requests_total[5m]))"},
@@ -9163,9 +9206,48 @@ class AiProfilePanel(QWidget):
             data = resp.json()
             if data.get("status") == "success" and data["data"]["result"]:
                 val = float(data["data"]["result"][0]["value"][1])
-                current_hour = __import__("datetime").datetime.now().hour
+                current_hour = _dt.datetime.now().hour
                 self._live_rps[current_hour] = val
                 self._heatmap.update_live(current_hour, val)
+
+            # ── 2. Bugünün saatlik RPS ortalamaları (sarı geçmiş çizgisi) ─
+            # Gün başından şu ana kadar 1 saatlik adımlarla sorgula
+            now = _time.time()
+            midnight = _dt.datetime.now().replace(
+                hour=0, minute=0, second=0, microsecond=0
+            ).timestamp()
+
+            range_resp = _req.get(
+                self.PROM_URL.replace("/query", "/query_range"),
+                params={
+                    "query": "sum(rate(http_requests_total[10m]))",
+                    "start": str(int(midnight)),
+                    "end":   str(int(now)),
+                    "step":  "3600"   # 1 saatlik adım → her saat 1 nokta
+                },
+                timeout=8
+            )
+            rdata = range_resp.json()
+            if rdata.get("status") == "success" and rdata["data"]["result"]:
+                today = _dt.date.today().isoformat()
+                for ts, v in rdata["data"]["result"][0].get("values", []):
+                    hour = _dt.datetime.fromtimestamp(float(ts)).hour
+                    rps  = float(v)
+                    self._hist_rps[hour] = rps
+                    self._heatmap.update_hist(hour, rps)
+                    # DB'ye kaydet → uygulama kapatılıp açılsa bile korunur
+                    self.db.save_hourly_rps(today, hour, rps)
+
+        except Exception:
+            pass
+
+    def _load_history_from_db(self):
+        """Uygulama açılışında son 7 günün saatlik ortalamasını DB'den yükler."""
+        try:
+            hist = self.db.get_hourly_rps_history(days=7)
+            for hour, avg_rps in hist.items():
+                self._hist_rps[hour] = avg_rps
+                self._heatmap.update_hist(hour, avg_rps)
         except Exception:
             pass
 
