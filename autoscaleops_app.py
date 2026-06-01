@@ -2420,10 +2420,11 @@ spec:
 
         # ── Adım 7: Port-forward ──────────────────────────────────────────
         emit(f"[7/7]  Port forward başlatılıyor → localhost:{port} …", "info")
-        # DB'yi güncelle ki start_port_forwards doğru servisi kullansın
-        self.db.set_setting("active_project_name",    name)
-        self.db.set_setting("active_project_port",    str(port))
-        self.db.set_setting("active_project_service", f"{name}-service")
+        # KRITIK: hem settings hem projects tablosunu güncelle (is_active=1)
+        # Sadece set_setting() çağrılırsa projects tablosu eski projeyi
+        # active=1 göstermeye devam eder → proje yönetimi UI'sında yanlış proje
+        self.db.set_active_project(name)   # projects.is_active + settings günceller
+        _write_active_project_json(name, port, f"{name}-service")
         self.stop_port_forwards()
         self.start_port_forwards(namespace)
         emit("       ✅  Port forward aktif.", "ok")
@@ -10425,15 +10426,21 @@ class DeployPanel(QWidget):
             self.db.set_active_project(name)
             _write_active_project_json(name, port, service)
             ok, msg = self.ops.switch_active_project(name, port, service, namespace)
-            self._btn_set_active.setEnabled(True)
+            # UI güncellemeleri main thread'de yapılmalı (Qt kuralı)
             if ok:
-                self._proj_status_lbl.setText(
-                    f"✅  '{name}' aktif — port {port}.  "
-                    f"AI ölçekleme bu proje için aktif."
-                )
-                self._refresh_project_list()
+                QTimer.singleShot(0, lambda: (
+                    self._btn_set_active.setEnabled(True),
+                    self._proj_status_lbl.setText(
+                        f"✅  '{name}' aktif — port {port}.  "
+                        f"AI ölçekleme bu proje için aktif."
+                    ),
+                    self._refresh_project_list()
+                ))
             else:
-                self._proj_status_lbl.setText(f"❌  Hata: {msg}")
+                QTimer.singleShot(0, lambda: (
+                    self._btn_set_active.setEnabled(True),
+                    self._proj_status_lbl.setText(f"❌  Hata: {msg}")
+                ))
 
         threading.Thread(target=do, daemon=True).start()
 
