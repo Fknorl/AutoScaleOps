@@ -1,0 +1,18 @@
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: pushgateway
+  namespace: monitoring
+  labels:
+    release: prometheus          # Prometheus bu label'ı arar
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: prometheus-pushgateway
+  endpoints:
+    - port: http                 # Service'deki port adı
+      path: /metrics
+      interval: 15s
+  namespaceSelector:
+    matchNames:
+      - monitoring

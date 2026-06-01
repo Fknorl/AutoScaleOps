@@ -1623,7 +1623,7 @@ class SystemOps:
         # Servis tanımları: (key, tercih_local_port, k8s_svc_adı, k8s_svc_port, namespace)
         SERVICES = [
             ("prometheus",  9090, "prometheus-kube-prometheus-prometheus", 9090, "monitoring"),
-            ("pushgateway", 9091, "prometheus-pushgateway",                9091, "monitoring"),
+            ("pushgateway", 9091, "pushgateway-prometheus-pushgateway",     9091, "monitoring"),
             ("app",         active_svc_port, active_svc, app_k8s_port, namespace),
         ]
 
@@ -2252,7 +2252,8 @@ spec:
             emit("       Devam ediliyor — pod'lar geç hazır olabilir.", "info")
 
         # ── Adım 6: KEDA ScaledObject ─────────────────────────────────────
-        emit("[6/7]  KEDA otomatik ölçekleme kuralı uygulanıyor…", "info")
+        emit("[6/7]  KEDA hibrit ölçekleme kuralı uygulanıyor…", "info")
+        name_safe = name.replace('-', '_')
         keda_yaml = f"""\
 apiVersion: keda.sh/v1alpha1
 kind: ScaledObject
@@ -2270,7 +2271,13 @@ spec:
   - type: prometheus
     metadata:
       serverAddress: http://prometheus-kube-prometheus-prometheus.monitoring.svc.cluster.local:9090
-      metricName: http_requests_total_{name.replace('-', '_')}
+      metricName: predicted_rps_30min
+      query: predicted_rps_30min
+      threshold: "50"
+  - type: prometheus
+    metadata:
+      serverAddress: http://prometheus-kube-prometheus-prometheus.monitoring.svc.cluster.local:9090
+      metricName: http_requests_total_{name_safe}
       threshold: "50"
       query: >-
         sum(rate(http_requests_total{{kubernetes_pod_name=~"{name}-.*"}}[2m]))
@@ -2279,9 +2286,19 @@ spec:
         keda_path.write_text(keda_yaml, encoding="utf-8")
         ok_k, out_k = run_ps(f"kubectl apply -f '{keda_path}' 2>&1", timeout=30)
         if ok_k:
-            emit("       ✅  KEDA ScaledObject aktif — AI ölçekleme hazır.", "ok")
+            emit("       ✅  KEDA hibrit ScaledObject aktif (proaktif + reaktif).", "ok")
         else:
             emit("       ⚠️  KEDA kurulamadı (KEDA yüklü değil olabilir) — devam ediliyor.", "warn")
+
+        # ── Adım 6.5: Prometheus ServiceMonitor oluştur ──────────────────────
+        # kube-prometheus-stack annotation tabanlı discovery KULLANMAZ.
+        # ServiceMonitor CRD (release: prometheus label) gereklidir.
+        emit("       Prometheus ServiceMonitor olusturuluyor…", "info")
+        ok_sm, sm_out = self.apply_scrape_config(namespace, app_name=name)
+        if ok_sm:
+            emit("       OK  ServiceMonitor aktif — Prometheus metrikleri toplayacak.", "ok")
+        else:
+            emit(f"       WARN  ServiceMonitor: {sm_out[:150]}", "warn")
 
         # ── Adım 7: Port-forward ──────────────────────────────────────────
         emit(f"[7/7]  Port forward başlatılıyor → localhost:{port} …", "info")
@@ -2437,41 +2454,80 @@ spec:
 
         return True, f"Aktif proje değiştirildi: {name} (port {port})"
 
-    # -- Prometheus scrape config -----------------
-    def apply_scrape_config(self, namespace: str) -> Tuple[bool, str]:
-        scrape_yaml = (
-            "- job_name: 'autoscaleops-app'\n"
-            "  kubernetes_sd_configs:\n"
-            "    - role: pod\n"
-            f"      namespaces:\n"
-            f"        names: ['{namespace}']\n"
-            "  relabel_configs:\n"
-            "    - source_labels: [__meta_kubernetes_pod_label_app]\n"
-            "      action: keep\n"
-            "      regex: autoscaleops-app\n"
-            "    - source_labels: [__meta_kubernetes_pod_ip, __meta_kubernetes_pod_container_port_number]\n"
-            "      action: replace\n"
-            "      regex: (.+);(.+)\n"
-            "      replacement: $1:$2\n"
-            "      target_label: __address__\n"
-            "    - target_label: __metrics_path__\n"
-            "      replacement: /metrics\n"
-        )
-        # Write scrape config to temp file and apply via kubectl
-        import base64
-        b64 = base64.b64encode(scrape_yaml.encode("utf-8")).decode("ascii")
-        secret_json = (
-            '{"apiVersion":"v1","kind":"Secret","metadata":{"name":"autoscaleops-scrape-config","namespace":"monitoring"},'
-            f'"data":{{"config.yaml":"{b64}"}}}}'
-        )
-        cmd1 = f'echo \'{secret_json}\' | kubectl apply -f - 2>&1'
-        cmd2 = (
-            'kubectl patch prometheus prometheus-kube-prometheus-prometheus -n monitoring '
-            '--type merge -p \'{"spec":{"additionalScrapeConfigs":{"name":"autoscaleops-scrape-config","key":"config.yaml"}}}\' 2>&1'
-        )
-        ok1, out1 = run_ps(cmd1, timeout=60)
-        ok2, out2 = run_ps(cmd2, timeout=60)
-        return ok1 and ok2, f"{out1}\n{out2}"
+    # -- Prometheus scrape config (ServiceMonitor yaklaşımı) -----------------
+    def apply_scrape_config(self, namespace: str, app_name: str = "") -> Tuple[bool, str]:
+        """
+        kube-prometheus-stack ile uyumlu ServiceMonitor'lar oluşturur.
+        Annotation tabanlı discovery çalışmaz; ServiceMonitor CRD gereklidir.
+        Prometheus, 'release: prometheus' label'ına sahip ServiceMonitor'ları izler.
+        """
+        import tempfile, os as _os
+
+        # Uygulama adını belirle (deploy sırasında geçilir, yoksa DB'den al)
+        if not app_name:
+            app_name = self.db.get_setting("active_project_name", "")
+
+        app_label = app_name if app_name else namespace
+
+        # 1. Uygulama ServiceMonitor (yeni deploy'da /metrics scrape)
+        app_sm_yaml = f"""apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: {app_label}-app-metrics
+  namespace: {namespace}
+  labels:
+    release: prometheus
+spec:
+  selector:
+    matchLabels:
+      app: {app_label}
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: 15s
+"""
+        # 2. Pushgateway ServiceMonitor (predicted_rps_30min için)
+        pgw_sm_yaml = """apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: pushgateway
+  namespace: monitoring
+  labels:
+    release: prometheus
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: prometheus-pushgateway
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: 15s
+  namespaceSelector:
+    matchNames:
+      - monitoring
+"""
+        msgs = []
+        success = True
+
+        for yaml_content, label in [(app_sm_yaml, "App ServiceMonitor"),
+                                     (pgw_sm_yaml, "Pushgateway ServiceMonitor")]:
+            with tempfile.NamedTemporaryFile(
+                mode="w", suffix=".yaml", delete=False, encoding="utf-8"
+            ) as f:
+                f.write(yaml_content)
+                tmp = f.name
+            try:
+                ok, out = run_ps(f"kubectl apply -f '{tmp}' 2>&1", timeout=30)
+                msgs.append(f"{label}: {'OK' if ok else 'FAIL'} — {out.strip()}")
+                if not ok:
+                    success = False
+            finally:
+                try:
+                    _os.unlink(tmp)
+                except Exception:
+                    pass
+
+        return success, "\n".join(msgs)
 
     # -- Diagnostics ------------------------------
     def run_diagnostics(self) -> List[Dict]:
@@ -6068,7 +6124,7 @@ class TroubleshooterPanel(QWidget):
             self._show_fix(cmd)
 
         elif action == "fwd_prometheus":
-            cmd = "kubectl port-forward svc/prometheus-operated 9090:9090 -n monitoring"
+            cmd = "kubectl port-forward svc/prometheus-kube-prometheus-prometheus 9090:9090 -n monitoring"
             self._show_fix(cmd)
 
         elif action == "check_keda":
@@ -8447,10 +8503,14 @@ class MainWindow(QMainWindow):
 
         def _run():
             try:
+                import os as _os
+                env = _os.environ.copy()
+                env["PYTHONIOENCODING"] = "utf-8"   # Windows emoji crash önleme
                 subprocess.Popen(
                     [sys.executable, str(predictor_path)],
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
+                    env=env,
                     creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0
                 )
             except Exception:
