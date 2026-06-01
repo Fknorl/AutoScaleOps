@@ -886,10 +886,19 @@ class AppDatabase:
                     notes TEXT DEFAULT ''
                 );
                 CREATE TABLE IF NOT EXISTS hourly_rps_history (
-                    date  TEXT NOT NULL,
-                    hour  INTEGER NOT NULL,
-                    avg_rps REAL NOT NULL,
+                    date        TEXT NOT NULL,
+                    hour        INTEGER NOT NULL,
+                    day_of_week INTEGER NOT NULL DEFAULT 0,
+                    avg_rps     REAL NOT NULL,
                     PRIMARY KEY (date, hour)
+                );
+                CREATE TABLE IF NOT EXISTS weekly_pattern (
+                    day_of_week  INTEGER NOT NULL,
+                    hour         INTEGER NOT NULL,
+                    avg_rps      REAL NOT NULL DEFAULT 0.0,
+                    sample_count INTEGER NOT NULL DEFAULT 0,
+                    last_updated TEXT NOT NULL,
+                    PRIMARY KEY (day_of_week, hour)
                 );
             """)
             self._ensure_default_profile()
@@ -1160,11 +1169,20 @@ class AppDatabase:
 
     # ── Saatlik RPS Geçmişi ─────────────────────────────────────────────────
     def save_hourly_rps(self, date_str: str, hour: int, avg_rps: float) -> None:
-        """Prometheus'tan çekilen saatlik RPS ortalamasını DB'ye kaydeder."""
+        """Prometheus'tan çekilen saatlik RPS ortalamasını DB'ye kaydeder.
+        day_of_week: 0=Pazartesi … 6=Pazar
+        """
+        import datetime as _dt
+        try:
+            d = _dt.date.fromisoformat(date_str)
+            dow = d.weekday()   # 0=Mon … 6=Sun
+        except Exception:
+            dow = 0
         with self._lock:
             self.conn.execute(
-                "INSERT OR REPLACE INTO hourly_rps_history (date, hour, avg_rps) VALUES (?,?,?)",
-                (date_str, hour, round(avg_rps, 4))
+                "INSERT OR REPLACE INTO hourly_rps_history "
+                "(date, hour, day_of_week, avg_rps) VALUES (?,?,?,?)",
+                (date_str, hour, dow, round(avg_rps, 4))
             )
             self.conn.commit()
 
@@ -1179,6 +1197,73 @@ class AppDatabase:
                 (cutoff,)
             )
             return {row[0]: row[1] for row in cur.fetchall()}
+
+    def rebuild_weekly_pattern(self) -> None:
+        """
+        Haftalık örüntü tablosunu sıfırdan hesaplar.
+        Her (gün, saat) çifti için geçmiş ortalaması → weekly_pattern tablosuna yazar.
+        Danışman (ProfileAdvisor) bu tabloyu kullanarak profil ağırlıklarını günceller.
+        """
+        import datetime as _dt
+        now_str = _dt.datetime.now().isoformat(timespec="seconds")
+        with self._lock:
+            cur = self.conn.execute(
+                "SELECT day_of_week, hour, AVG(avg_rps), COUNT(*) "
+                "FROM hourly_rps_history GROUP BY day_of_week, hour"
+            )
+            rows = cur.fetchall()
+            if not rows:
+                return
+            self.conn.executemany(
+                "INSERT OR REPLACE INTO weekly_pattern "
+                "(day_of_week, hour, avg_rps, sample_count, last_updated) "
+                "VALUES (?,?,?,?,?)",
+                [(int(r[0]), int(r[1]), round(r[2], 4), int(r[3]), now_str)
+                 for r in rows]
+            )
+            self.conn.commit()
+
+    def get_weekly_pattern(self) -> dict:
+        """weekly_pattern tablosunu döner: {(day_of_week, hour): avg_rps}"""
+        with self._lock:
+            cur = self.conn.execute(
+                "SELECT day_of_week, hour, avg_rps, sample_count "
+                "FROM weekly_pattern ORDER BY day_of_week, hour"
+            )
+            return {(r[0], r[1]): {"avg_rps": r[2], "samples": r[3]}
+                    for r in cur.fetchall()}
+
+    def compute_auto_weights(self) -> dict:
+        """
+        Haftalık örüntüden otomatik saat ağırlıkları hesaplar.
+        Mantık: bu saatin ortalaması / tüm saatlerin genel ortalaması
+        Örnek: Saat 14 genel ortalamanın 1.8 katıysa → weight=1.8
+        Sonuç: {hour(0-23): weight(0.1-3.0)}
+        """
+        pattern = self.get_weekly_pattern()
+        if not pattern:
+            return {}
+
+        # Tüm (gün, saat) çiftlerinin RPS ortalamasını saat bazında grupla
+        hour_totals: dict[int, list] = {h: [] for h in range(24)}
+        for (dow, hour), info in pattern.items():
+            if info["samples"] >= 2:   # En az 2 örnek şartı
+                hour_totals[hour].append(info["avg_rps"])
+
+        hour_avgs = {h: sum(vals)/len(vals)
+                     for h, vals in hour_totals.items() if vals}
+        if not hour_avgs:
+            return {}
+
+        overall_avg = sum(hour_avgs.values()) / len(hour_avgs)
+        if overall_avg < 0.01:
+            return {}
+
+        weights = {}
+        for hour, avg in hour_avgs.items():
+            raw = avg / overall_avg
+            weights[hour] = round(max(0.1, min(3.0, raw)), 2)
+        return weights
 
     # ── Proje Yönetimi ──────────────────────────────────────────────────────
 
@@ -8901,6 +8986,140 @@ class AppController(QObject):
 
 
 # ─────────────────────────────────────────────
+#  OTOMATİK DANIŞMAN — ProfileAdvisor
+# ─────────────────────────────────────────────
+class ProfileAdvisor(QObject):
+    """
+    Arka planda çalışan otomatik danışman.
+
+    Görevleri:
+      1. Prometheus'tan saatlik RPS verisi çeker → DB'ye kaydeder
+      2. Haftalık örüntü tablosunu günceller (gün × saat matrisi)
+      3. Yeterli veri birikince saat ağırlıklarını otomatik hesaplar
+      4. domain_profile.json'ı günceller → predictor.py bunu okur
+
+    Çalışma sıklığı: Her 1 saatte bir (3600 saniye)
+    Otomatik devreye girme: En az 3 günlük veri birikince
+    """
+
+    # Ana pencereye bildirim sinyali (log + UI güncelleme için)
+    advisor_log = pyqtSignal(str, str)   # mesaj, seviye ("info"|"ok"|"warn")
+
+    PROM_URL = "http://127.0.0.1:9090/api/v1/query_range"
+    MIN_DAYS_FOR_AUTO = 3    # Otomatik ağırlık için gereken minimum gün sayısı
+
+    def __init__(self, db: 'AppDatabase', ops: 'SystemOps', parent=None):
+        super().__init__(parent)
+        self.db  = db
+        self.ops = ops
+
+    def run_cycle(self) -> None:
+        """Bir danışman döngüsü çalıştırır. QThread veya QTimer'dan çağrılır."""
+        import threading
+        threading.Thread(target=self._cycle_bg, daemon=True).start()
+
+    def _cycle_bg(self) -> None:
+        """Arka plan iş parçacığında çalışır."""
+        import datetime as _dt, time as _time, requests as _req
+
+        now       = _time.time()
+        today_str = _dt.date.today().isoformat()
+        midnight  = _dt.datetime.now().replace(
+            hour=0, minute=0, second=0, microsecond=0
+        ).timestamp()
+
+        self.advisor_log.emit("Profil danismani: Prometheus'tan veri cekiliyor...", "info")
+
+        # ── 1. Bugünün saatlik RPS ortalamalarını çek ─────────────────────
+        try:
+            resp = _req.get(
+                self.PROM_URL,
+                params={
+                    "query": "sum(rate(http_requests_total[10m]))",
+                    "start": str(int(midnight)),
+                    "end":   str(int(now)),
+                    "step":  "3600"
+                },
+                timeout=10
+            )
+            data = resp.json()
+            saved = 0
+            if data.get("status") == "success" and data["data"]["result"]:
+                for ts, v in data["data"]["result"][0].get("values", []):
+                    hour = _dt.datetime.fromtimestamp(float(ts)).hour
+                    rps  = float(v)
+                    if rps > 0:
+                        self.db.save_hourly_rps(today_str, hour, rps)
+                        saved += 1
+            if saved:
+                self.advisor_log.emit(
+                    f"  {saved} saatlik RPS verisi kaydedildi ({today_str})", "ok"
+                )
+        except Exception as e:
+            self.advisor_log.emit(f"  Prometheus hatasi: {e}", "warn")
+            return
+
+        # ── 2. Haftalık örüntü tablosunu yeniden hesapla ──────────────────
+        self.db.rebuild_weekly_pattern()
+
+        # ── 3. Yeterli veri var mı? ────────────────────────────────────────
+        pattern = self.db.get_weekly_pattern()
+        if not pattern:
+            self.advisor_log.emit("  Henuz haftalik oruntu yok — veri birikmesi bekleniyor.", "info")
+            return
+
+        # Kaç farklı gün var?
+        import datetime as _dt2
+        with self.db._lock:
+            cur = self.db.conn.execute(
+                "SELECT COUNT(DISTINCT date) FROM hourly_rps_history"
+            )
+            unique_days = cur.fetchone()[0]
+
+        if unique_days < self.MIN_DAYS_FOR_AUTO:
+            self.advisor_log.emit(
+                f"  {unique_days}/{self.MIN_DAYS_FOR_AUTO} gun birikmis — "
+                f"otomatik agirlik icin {self.MIN_DAYS_FOR_AUTO} gun gerekli.", "info"
+            )
+            return
+
+        # ── 4. Otomatik ağırlıkları hesapla ve uygula ────────────────────
+        auto_weights = self.db.compute_auto_weights()
+        if not auto_weights:
+            return
+
+        # Mevcut profili al, sadece veri olan saatleri güncelle
+        current_profile = self.db.get_traffic_profile()
+        updates = {}
+        changes = []
+        for hour, new_w in auto_weights.items():
+            old_w = current_profile.get(hour, {}).get("weight", 1.0)
+            # Büyük farklılık varsa (>%15) güncelle
+            if abs(new_w - old_w) > 0.15:
+                updates[hour] = {"weight": new_w, "label": "auto"}
+                changes.append(f"  Saat {hour:02d}: {old_w:.2f} → {new_w:.2f}")
+
+        if updates:
+            self.db.set_full_profile({
+                h: updates.get(h, {"weight": current_profile.get(h, {}).get("weight", 1.0),
+                                   "label":  current_profile.get(h, {}).get("label", "")})
+                for h in range(24)
+            })
+            self.ops.sync_domain_profile()   # predictor.py'ye bildir
+            self.advisor_log.emit(
+                f"  Otomatik agirliklar guncellendi ({len(updates)} saat):", "ok"
+            )
+            for c in changes[:5]:   # En fazla 5 satır göster
+                self.advisor_log.emit(c, "info")
+            if len(changes) > 5:
+                self.advisor_log.emit(f"  ... ve {len(changes)-5} saat daha", "info")
+        else:
+            self.advisor_log.emit(
+                f"  Profil guncel — buyuk degisim yok ({unique_days} gunluk veri).", "ok"
+            )
+
+
+# ─────────────────────────────────────────────
 #  AI PROFİL PANELİ
 # ─────────────────────────────────────────────
 class AiProfilePanel(QWidget):
@@ -8919,7 +9138,14 @@ class AiProfilePanel(QWidget):
         self.ops = ops
         self._live_rps: dict[int, float] = {}   # saat → ortalama RPS (Prom'dan)
         self._hist_rps: dict[int, float] = {}   # saat → 7 günlük ort. (DB + Prom)
+
+        # Otomatik Danışman
+        self._advisor = ProfileAdvisor(db, ops, parent=self)
+        self._advisor.advisor_log.connect(self._on_advisor_log,
+                                          Qt.ConnectionType.QueuedConnection)
+
         self._build_ui()
+
         # DB'deki geçmiş veriyi hemen yükle (Prometheus açık olmasa bile çalışır)
         QTimer.singleShot(500,  self._load_history_from_db)
         # Prometheus'tan canlı + bugünkü veriyi çek
@@ -8927,6 +9153,12 @@ class AiProfilePanel(QWidget):
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._refresh_live)
         self._timer.start(30000)   # Her 30 saniyede güncelle
+
+        # Danışman: ilk çalıştırma 5 dk sonra, sonra her saat
+        QTimer.singleShot(300000, self._advisor.run_cycle)
+        self._advisor_timer = QTimer(self)
+        self._advisor_timer.timeout.connect(self._advisor.run_cycle)
+        self._advisor_timer.start(3600000)   # Her 1 saatte bir
 
     # ── UI ─────────────────────────────────────────────────────────────────
     def _build_ui(self):
@@ -9078,6 +9310,33 @@ class AiProfilePanel(QWidget):
         ev_lay.addWidget(self._ev_list)
         ev_lay.addWidget(del_btn)
         lay.addWidget(ev_card)
+
+        # ── 4. Otomatik Danışman ────────────────────────────────────────────
+        adv_card = self._make_card("Otomatik Profil Danismani")
+        adv_lay  = adv_card.layout()
+
+        adv_info = QLabel(
+            "Danissman her saat Prometheus'tan saatlik RPS verisi ceker, haftalik orntuyu "
+            "ogrenilir ve profil agirliklarini otomatik gunceller.\n"
+            "En az 3 gunluk veri birikmesi gereklidir. 'auto' etiketli saatler otomatik ayarlanmistir."
+        )
+        adv_info.setWordWrap(True)
+        adv_info.setStyleSheet(f"color:{C_TEXT_DIM}; font-size:11px; background:transparent; border:none;")
+        adv_lay.addWidget(adv_info)
+
+        adv_btn_row = QHBoxLayout()
+        btn_run_adv = QPushButton("Simdi Calistir")
+        btn_run_adv.setFixedHeight(30)
+        btn_run_adv.clicked.connect(self._advisor.run_cycle)
+        adv_btn_row.addWidget(btn_run_adv)
+        adv_btn_row.addStretch()
+        adv_lay.addLayout(adv_btn_row)
+
+        self._advisor_log_widget = LogWidget()
+        self._advisor_log_widget.setMaximumHeight(120)
+        adv_lay.addWidget(self._advisor_log_widget)
+
+        lay.addWidget(adv_card)
 
         lay.addStretch()
         scroll.setWidget(inner)
@@ -9250,6 +9509,30 @@ class AiProfilePanel(QWidget):
                 self._heatmap.update_hist(hour, avg_rps)
         except Exception:
             pass
+
+    @pyqtSlot(str, str)
+    def _on_advisor_log(self, msg: str, level: str) -> None:
+        """Danışmandan gelen log mesajlarını UI'daki log widget'ına yazar."""
+        try:
+            self._advisor_log_widget.append_line(msg, level)
+        except Exception:
+            pass
+
+    def refresh_sliders_from_profile(self) -> None:
+        """DB'deki profil verisine göre kaydırıcıları günceller (danışman güncellemesinden sonra)."""
+        profile = self.db.get_traffic_profile()
+        for h, sl in enumerate(self._sliders):
+            w = profile.get(h, {}).get("weight", 1.0)
+            sl.blockSignals(True)
+            sl.setValue(int(round(w * 10)))
+            sl.blockSignals(False)
+            color = C_RED if w > 2.0 else (C_YELLOW if w > 1.3 else C_ACCENT)
+            self._hour_vals[h].setText(f"{w:.1f}")
+            self._hour_vals[h].setStyleSheet(
+                f"color:{color}; font-size:10px; font-weight:600; "
+                f"background:transparent; border:none;"
+            )
+            self._heatmap.update_profile(h, w)
 
 
 # ── Yoğunluk haritası widget ──────────────────────────────────────────────────
