@@ -300,9 +300,15 @@ while True:
 
     # 2. Yetersiz veri → EMA fallback
     if len(history) < 15:
-        fallback_value = ema_fallback(history, current_rps)
-        print(f"📈 EMA Fallback: {fallback_value:.2f} "
-              f"(veri: {len(history)}/15, gerçek: {current_rps:.2f})")
+        hour_weight    = get_profile_multiplier(FORECAST_HORIZON)
+        event_margin   = get_event_margin(FORECAST_HORIZON)
+        ema_val        = ema_fallback(history, current_rps)
+        ema_scaled     = ema_val * hour_weight * (1.0 + event_margin)
+        baseline_floor = POD_CAPACITY_THRESHOLD * max(hour_weight - 1.0, 0.0)
+        fallback_value = max(ema_scaled, baseline_floor)
+        print(f"📈 EMA Fallback: ema={ema_val:.2f} | profil x{hour_weight:.2f} | "
+              f"taban={baseline_floor:.2f} | sonuc={fallback_value:.2f} "
+              f"(veri: {len(history)}/15)")
         g_predicted.set(fallback_value)
         try:
             push_to_gateway(PUSHGATEWAY_URL, job='ai_predictor', registry=registry)
@@ -338,12 +344,19 @@ while True:
         # Domain profil ağırlığı + etkinlik marjı uygula
         hour_weight   = get_profile_multiplier(FORECAST_HORIZON)
         event_margin  = get_event_margin(FORECAST_HORIZON)
-        ai_prediction = ai_prediction * hour_weight * (1.0 + event_margin)
+
+        # Çarpan tahmini büyütür; ama ARIMA=0 ise çarpım yine 0 olur.
+        # Minimum garanti: weight > 1.0 ise "bu saatte en az şu kadar
+        # trafik bekliyorum" anlamına gelir → POD_CAPACITY_THRESHOLD × weight
+        # değerini alt sınır olarak kullan.
+        arima_scaled   = ai_prediction * hour_weight * (1.0 + event_margin)
+        baseline_floor = POD_CAPACITY_THRESHOLD * max(hour_weight - 1.0, 0.0)
+        ai_prediction  = max(arima_scaled, baseline_floor)
 
         print(f"🔮 Nokta: {ai_pred_raw:.2f} | "
               f"%{int(CI_LEVEL*100)} GA: [{min(lower_ci):.2f}, {max(upper_ci):.2f}] | "
               f"Profil x{hour_weight:.2f} | Etkinlik +%{int(event_margin*100)} | "
-              f"Kullanilan: {ai_prediction:.2f}")
+              f"Taban: {baseline_floor:.2f} | Kullanilan: {ai_prediction:.2f}")
 
     except Exception as e:
         print(f"⚠️ Model hatası: {e} — Gerçek RPS kullanılıyor.")

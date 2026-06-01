@@ -2367,6 +2367,11 @@ spec:
         # ── Adım 6: KEDA ScaledObject ─────────────────────────────────────
         emit("[6/7]  KEDA hibrit ölçekleme kuralı uygulanıyor…", "info")
         name_safe = name.replace('-', '_')
+        # KEDA eşiği: DB'den al (kullanıcı SettingsPanel'den ayarlayabilir)
+        keda_threshold = self.db.get_setting("keda_rps_threshold", "50")
+        keda_min_pods  = self.db.get_setting("keda_min_pods", "1")
+        keda_max_pods  = self.db.get_setting("keda_max_pods", "10")
+
         keda_yaml = f"""\
 apiVersion: keda.sh/v1alpha1
 kind: ScaledObject
@@ -2376,8 +2381,8 @@ metadata:
 spec:
   scaleTargetRef:
     name: {name}-deployment
-  minReplicaCount: 1
-  maxReplicaCount: 10
+  minReplicaCount: {keda_min_pods}
+  maxReplicaCount: {keda_max_pods}
   cooldownPeriod: 60
   pollingInterval: 15
   triggers:
@@ -2386,12 +2391,12 @@ spec:
       serverAddress: http://prometheus-kube-prometheus-prometheus.monitoring.svc.cluster.local:9090
       metricName: predicted_rps_30min
       query: predicted_rps_30min
-      threshold: "50"
+      threshold: "{keda_threshold}"
   - type: prometheus
     metadata:
       serverAddress: http://prometheus-kube-prometheus-prometheus.monitoring.svc.cluster.local:9090
       metricName: http_requests_total_{name_safe}
-      threshold: "50"
+      threshold: "{keda_threshold}"
       query: >-
         sum(rate(http_requests_total{{kubernetes_pod_name=~"{name}-.*"}}[2m]))
 """
@@ -6490,6 +6495,54 @@ class SettingsPanel(QWidget):
         lb.addWidget(lang_note)
         lay.addWidget(lang_card)
 
+        # ── KEDA & Ölçekleme Ayarları ──────────────────────────────────────
+        keda_card = Card("KEDA & Olcekleme Ayarlari")
+        kb = keda_card.body()
+
+        keda_info = QLabel(
+            "Pod basina dusen RPS esigini belirleyin. Ornek: esik=50 ve tahmin=100 → 2 pod."
+        )
+        keda_info.setWordWrap(True)
+        keda_info.setStyleSheet(f"color:{C_TEXT_DIM}; font-size:11px;")
+        kb.addWidget(keda_info)
+
+        keda_form = QHBoxLayout()
+
+        # RPS Eşiği
+        keda_form.addWidget(QLabel("Pod basina RPS esigi:"))
+        self._keda_threshold = QSpinBox()
+        self._keda_threshold.setRange(1, 10000)
+        self._keda_threshold.setValue(int(db.get_setting("keda_rps_threshold", "50")))
+        self._keda_threshold.setFixedWidth(90)
+        self._keda_threshold.setToolTip("Bir pod'un kaldirabilecegi maksimum RPS")
+        keda_form.addWidget(self._keda_threshold)
+        keda_form.addSpacing(20)
+
+        # Min Pod
+        keda_form.addWidget(QLabel("Min pod:"))
+        self._keda_min = QSpinBox()
+        self._keda_min.setRange(0, 20)
+        self._keda_min.setValue(int(db.get_setting("keda_min_pods", "1")))
+        self._keda_min.setFixedWidth(60)
+        keda_form.addWidget(self._keda_min)
+        keda_form.addSpacing(20)
+
+        # Max Pod
+        keda_form.addWidget(QLabel("Max pod:"))
+        self._keda_max = QSpinBox()
+        self._keda_max.setRange(1, 100)
+        self._keda_max.setValue(int(db.get_setting("keda_max_pods", "10")))
+        self._keda_max.setFixedWidth(60)
+        keda_form.addWidget(self._keda_max)
+        keda_form.addStretch()
+        kb.addLayout(keda_form)
+
+        btn_save_keda = QPushButton("Kaydet")
+        btn_save_keda.setFixedHeight(32)
+        btn_save_keda.clicked.connect(self._save_keda_settings)
+        kb.addWidget(btn_save_keda)
+        lay.addWidget(keda_card)
+
         # ── Hakkında kartı
         about_card = Card(t("settings.about"))
         ab = about_card.body()
@@ -6523,6 +6576,21 @@ class SettingsPanel(QWidget):
         outer = QVBoxLayout(self)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.addWidget(scroll)
+
+    def _save_keda_settings(self):
+        threshold = str(self._keda_threshold.value())
+        min_pods  = str(self._keda_min.value())
+        max_pods  = str(self._keda_max.value())
+        self.db.set_setting("keda_rps_threshold", threshold)
+        self.db.set_setting("keda_min_pods",      min_pods)
+        self.db.set_setting("keda_max_pods",      max_pods)
+        QMessageBox.information(
+            self, "Kaydedildi",
+            f"KEDA ayarlari kaydedildi.\n"
+            f"Esik: {threshold} RPS/pod | Min: {min_pods} | Max: {max_pods}\n\n"
+            f"Yeni deploy'larda bu degerler kullanilacak.\n"
+            f"Mevcut ScaledObject icin kubectl patch gerekebilir."
+        )
 
     def _on_lang_changed(self, index: int):
         global _APP_LANG
@@ -8171,7 +8239,8 @@ class DashboardPanel(QWidget):
 # ─────────────────────────────────────────────
 class MainWindow(QMainWindow):
     # Worker thread'lerden main thread'e cluster durumu iletmek için
-    _cluster_status_signal = pyqtSignal(bool)
+    _cluster_status_signal   = pyqtSignal(bool)
+    _predictor_alert_signal  = pyqtSignal(str)   # predictor watchdog uyarısı
 
     def __init__(self, db, ops, parent=None):
         super().__init__(parent)
@@ -8573,17 +8642,26 @@ class MainWindow(QMainWindow):
         self._cluster_status_signal.connect(
             self._update_cluster_ui, Qt.ConnectionType.QueuedConnection
         )
+        # Predictor watchdog uyarısı
+        self._predictor_alert_signal.connect(
+            self._on_predictor_alert, Qt.ConnectionType.QueuedConnection
+        )
 
-        # ── ARIMA Predictor otomatik başlatma ───────────────────────────────
-        # predictor.py cluster hazır olunca arka planda başlar.
-        # Zaten çalışıyorsa (port kontrol) yeniden başlatılmaz.
+        # ── ARIMA Predictor watchdog ─────────────────────────────────────────
+        # İlk başlatma: 8 sn sonra
+        # Watchdog: her 2 dk'da bir predictor sağlığını kontrol eder,
+        # çökmüşse sessizce yeniden başlatır.
+        self._predictor_proc: Optional[subprocess.Popen] = None
+        self._predictor_miss_count: int = 0   # kaç kontrol periyodundur tahmin yok
         QTimer.singleShot(8000, self._start_predictor_if_needed)
+        self._predictor_watchdog = QTimer(self)
+        self._predictor_watchdog.timeout.connect(self._check_predictor_health)
+        self._predictor_watchdog.start(120_000)   # her 2 dakika
 
     def _start_predictor_if_needed(self):
         """
         ARIMA predictor'ı arka planda başlatır.
-        Pushgateway üzerinden predicted_rps_30min metriğini üretir.
-        Zaten bir predictor süreci çalışıyorsa yeniden başlatmaz.
+        Süreç referansını self._predictor_proc'da saklar (watchdog için).
         """
         import threading, subprocess, sys
         from pathlib import Path as _Path
@@ -8592,44 +8670,74 @@ class MainWindow(QMainWindow):
         if not predictor_path.exists():
             return
 
-        # Pushgateway çalışıyor mu? (predictor'ın hedefi)
+        # Zaten canlı bir süreç var mı?
+        if self._predictor_proc and self._predictor_proc.poll() is None:
+            return
+
+        # Pushgateway erişilebilir mi?
         try:
             import requests as _req
             r = _req.get("http://127.0.0.1:9091/metrics", timeout=2)
-            pushgw_ok = r.status_code == 200
+            if r.status_code != 200:
+                return
         except Exception:
-            pushgw_ok = False
-
-        if not pushgw_ok:
-            return  # Pushgateway yoksa predictor başlatma
-
-        # predicted_rps_30min zaten Prometheus'ta var mı?
-        try:
-            import requests as _req
-            r = _req.get("http://127.0.0.1:9090/api/v1/query",
-                         params={"query": "predicted_rps_30min"}, timeout=3)
-            result = r.json().get("data", {}).get("result", [])
-            if result:
-                return  # Zaten çalışıyor
-        except Exception:
-            pass
+            return
 
         def _run():
             try:
                 import os as _os
                 env = _os.environ.copy()
-                env["PYTHONIOENCODING"] = "utf-8"   # Windows emoji crash önleme
-                subprocess.Popen(
+                env["PYTHONIOENCODING"] = "utf-8"
+                proc = subprocess.Popen(
                     [sys.executable, str(predictor_path)],
                     stdout=subprocess.DEVNULL,
                     stderr=subprocess.DEVNULL,
                     env=env,
                     creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, "CREATE_NO_WINDOW") else 0
                 )
+                self._predictor_proc = proc
             except Exception:
                 pass
 
         threading.Thread(target=_run, daemon=True).start()
+
+    def _check_predictor_health(self):
+        """
+        Her 2 dakikada bir predictor sağlığını kontrol eder.
+        Prometheus'ta predicted_rps_30min yoksa veya süreç ölmüşse yeniden başlatır.
+        3 ardışık başarısız kontrolden sonra kullanıcıya uyarı toast gösterir.
+        """
+        import threading
+
+        def _check():
+            alive = (self._predictor_proc is not None and
+                     self._predictor_proc.poll() is None)
+            try:
+                import requests as _req
+                r = _req.get("http://127.0.0.1:9090/api/v1/query",
+                             params={"query": "predicted_rps_30min"}, timeout=3)
+                has_metric = bool(r.json().get("data", {}).get("result", []))
+            except Exception:
+                has_metric = False
+
+            if not alive or not has_metric:
+                self._predictor_miss_count += 1
+                self._start_predictor_if_needed()
+                if self._predictor_miss_count >= 3:
+                    # Ana thread'e uyarı gönder
+                    self._predictor_alert_signal.emit(
+                        f"Tahmin motoru yanit vermiyor ({self._predictor_miss_count}x). "
+                        "Yeniden baslatildi."
+                    )
+            else:
+                self._predictor_miss_count = 0
+
+        threading.Thread(target=_check, daemon=True).start()
+
+    @pyqtSlot(str)
+    def _on_predictor_alert(self, msg: str):
+        """Predictor watchdog uyarısını status bar'da göster."""
+        self.statusBar().showMessage(f"⚠ Tahmin Motoru: {msg}", 10000)
 
     @pyqtSlot(dict)
     def _on_hw_snapshot(self, data: dict):
@@ -9002,8 +9110,9 @@ class ProfileAdvisor(QObject):
     Otomatik devreye girme: En az 3 günlük veri birikince
     """
 
-    # Ana pencereye bildirim sinyali (log + UI güncelleme için)
-    advisor_log = pyqtSignal(str, str)   # mesaj, seviye ("info"|"ok"|"warn")
+    # Ana pencereye bildirim sinyalleri
+    advisor_log     = pyqtSignal(str, str)   # mesaj, seviye ("info"|"ok"|"warn")
+    profile_updated = pyqtSignal()           # DB profili değişti → UI slider'ları güncelle
 
     PROM_URL = "http://127.0.0.1:9090/api/v1/query_range"
     MIN_DAYS_FOR_AUTO = 3    # Otomatik ağırlık için gereken minimum gün sayısı
@@ -9106,6 +9215,7 @@ class ProfileAdvisor(QObject):
                 for h in range(24)
             })
             self.ops.sync_domain_profile()   # predictor.py'ye bildir
+            self.profile_updated.emit()      # UI slider'larını güncelle (main thread)
             self.advisor_log.emit(
                 f"  Otomatik agirliklar guncellendi ({len(updates)} saat):", "ok"
             )
@@ -9143,6 +9253,8 @@ class AiProfilePanel(QWidget):
         self._advisor = ProfileAdvisor(db, ops, parent=self)
         self._advisor.advisor_log.connect(self._on_advisor_log,
                                           Qt.ConnectionType.QueuedConnection)
+        self._advisor.profile_updated.connect(self.refresh_sliders_from_profile,
+                                              Qt.ConnectionType.QueuedConnection)
 
         self._build_ui()
 
@@ -9311,7 +9423,42 @@ class AiProfilePanel(QWidget):
         ev_lay.addWidget(del_btn)
         lay.addWidget(ev_card)
 
-        # ── 4. Otomatik Danışman ────────────────────────────────────────────
+        # ── 4. Sistem Ne Öğrendi? ───────────────────────────────────────────
+        learn_card = self._make_card("Sistem Ne Ogrendi?  (Haftalik Oruntu)")
+        learn_lay  = learn_card.layout()
+
+        self._learn_status = QLabel("Veri birikmesi bekleniyor...")
+        self._learn_status.setStyleSheet(
+            f"color:{C_TEXT_DIM}; font-size:11px; background:transparent; border:none;"
+        )
+        learn_lay.addWidget(self._learn_status)
+
+        # 7-satır × 24-sütun özet tablo (gün × saat)
+        self._pattern_table = QTableWidget(7, 24)
+        self._pattern_table.setMaximumHeight(160)
+        self._pattern_table.setHorizontalHeaderLabels([f"{h:02d}" for h in range(24)])
+        self._pattern_table.setVerticalHeaderLabels(
+            ["Pzt", "Sal", "Car", "Per", "Cum", "Cmt", "Paz"]
+        )
+        self._pattern_table.horizontalHeader().setDefaultSectionSize(26)
+        self._pattern_table.verticalHeader().setDefaultSectionSize(20)
+        self._pattern_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self._pattern_table.setStyleSheet(f"""
+            QTableWidget {{ background:{C_BG}; border:1px solid {C_BORDER};
+                            gridline-color:{C_BORDER}; color:{C_TEXT}; font-size:9px; }}
+            QHeaderView::section {{ background:{C_SURFACE}; color:{C_TEXT_DIM};
+                                    font-size:9px; border:none; padding:2px; }}
+        """)
+        learn_lay.addWidget(self._pattern_table)
+
+        btn_refresh_learn = QPushButton("Guncelle")
+        btn_refresh_learn.setFixedHeight(28)
+        btn_refresh_learn.clicked.connect(self._refresh_pattern_table)
+        learn_lay.addWidget(btn_refresh_learn)
+        lay.addWidget(learn_card)
+        QTimer.singleShot(2000, self._refresh_pattern_table)
+
+        # ── 5. Otomatik Danışman ────────────────────────────────────────────
         adv_card = self._make_card("Otomatik Profil Danismani")
         adv_lay  = adv_card.layout()
 
@@ -9509,6 +9656,87 @@ class AiProfilePanel(QWidget):
                 self._heatmap.update_hist(hour, avg_rps)
         except Exception:
             pass
+
+    def _refresh_pattern_table(self) -> None:
+        """
+        weekly_pattern tablosunu okur ve renk kodlu ısı haritası olarak gösterir.
+        Yüksek RPS → kırmızı, düşük → mavi, orta → nötr.
+        """
+        import threading
+        threading.Thread(target=self._load_pattern_bg, daemon=True).start()
+
+    def _load_pattern_bg(self) -> None:
+        try:
+            pattern = self.db.get_weekly_pattern()   # {(dow, hour): {avg_rps, samples}}
+            with self.db._lock:
+                from contextlib import suppress
+                with suppress(Exception):
+                    cur = self.db.conn.execute(
+                        "SELECT COUNT(DISTINCT date) FROM hourly_rps_history"
+                    )
+                    unique_days = cur.fetchone()[0]
+        except Exception:
+            unique_days = 0
+            pattern = {}
+
+        # UI güncellemesi main thread'de olmalı — signal yok, QTimer trick
+        from PyQt6.QtCore import QMetaObject, Qt as _Qt
+        QMetaObject.invokeMethod(
+            self, "_update_pattern_ui",
+            _Qt.ConnectionType.QueuedConnection,
+            *[],
+        )
+        # Argümanlı invokeMethod PyQt6'da karmaşık — closure ile çöz
+        self._pattern_data = (pattern, unique_days)
+        from PyQt6.QtCore import QTimer as _QT
+        _QT.singleShot(0, self._apply_pattern_ui)
+
+    def _apply_pattern_ui(self) -> None:
+        """Pattern verisini tabloya uygular (main thread)."""
+        from PyQt6.QtWidgets import QTableWidgetItem as _Item
+        from PyQt6.QtGui import QColor as _QColor
+
+        pattern, unique_days = getattr(self, "_pattern_data", ({}, 0))
+
+        if not pattern:
+            self._learn_status.setText(
+                f"Henuz haftalik oruntu yok | {unique_days} gun kayitli "
+                f"(en az {ProfileAdvisor.MIN_DAYS_FOR_AUTO} gun gerekli)"
+            )
+            return
+
+        self._learn_status.setText(
+            f"{unique_days} gun kayitli | "
+            f"{'Otomatik mod aktif' if unique_days >= ProfileAdvisor.MIN_DAYS_FOR_AUTO else f'Otomatik mod icin {ProfileAdvisor.MIN_DAYS_FOR_AUTO - unique_days} gun daha gerekli'}"
+        )
+
+        all_rps = [v["avg_rps"] for v in pattern.values() if v["avg_rps"] > 0]
+        if not all_rps:
+            return
+        max_rps = max(all_rps)
+        avg_rps = sum(all_rps) / len(all_rps)
+
+        for (dow, hour), info in pattern.items():
+            rps = info["avg_rps"]
+            samples = info["samples"]
+            if rps <= 0 or samples < 1:
+                continue
+
+            item = _Item(f"{rps:.0f}")
+            item.setTextAlignment(0x0004 | 0x0080)  # AlignCenter
+
+            # Renk: 0=mavi(düşük) … max=kırmızı(yüksek)
+            ratio = min(rps / max_rps, 1.0) if max_rps > 0 else 0
+            r = int(52  + ratio * (239 - 52))    # 52→239
+            g = int(211 - ratio * (211 - 68))    # 211→68
+            b = int(153 - ratio * (153 - 68))    # 153→68
+            item.setBackground(_QColor(r, g, b, 160))
+
+            # Az veri varsa gri tonu
+            if samples < 2:
+                item.setForeground(_QColor(C_TEXT_DIM))
+
+            self._pattern_table.setItem(dow, hour, item)
 
     @pyqtSlot(str, str)
     def _on_advisor_log(self, msg: str, level: str) -> None:
