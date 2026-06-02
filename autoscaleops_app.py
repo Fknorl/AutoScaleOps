@@ -9513,6 +9513,9 @@ class AiProfilePanel(QWidget):
     @staticmethod
     def _slider_style() -> str:
         return f"""
+            QSlider {{
+                font-size: 12pt;
+            }}
             QSlider::groove:vertical {{
                 background: {C_SURFACE2};
                 width: 6px;
@@ -9680,14 +9683,7 @@ class AiProfilePanel(QWidget):
             unique_days = 0
             pattern = {}
 
-        # UI güncellemesi main thread'de olmalı — signal yok, QTimer trick
-        from PyQt6.QtCore import QMetaObject, Qt as _Qt
-        QMetaObject.invokeMethod(
-            self, "_update_pattern_ui",
-            _Qt.ConnectionType.QueuedConnection,
-            *[],
-        )
-        # Argümanlı invokeMethod PyQt6'da karmaşık — closure ile çöz
+        # UI güncellemesi main thread'de QTimer trick ile yapılır
         self._pattern_data = (pattern, unique_days)
         from PyQt6.QtCore import QTimer as _QT
         _QT.singleShot(0, self._apply_pattern_ui)
