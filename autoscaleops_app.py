@@ -7090,6 +7090,11 @@ class DashboardPanel(QWidget):
     PROM_RANGE_URL = "http://127.0.0.1:9090/api/v1/query_range"
     COST_PER_POD_HOUR = 0.04
 
+    # ── Thread-safe sinyaller ────────────────────────────────────────────────
+    # Background thread'den main thread'e güvenli veri aktarımı için
+    _data_ready   = pyqtSignal(dict)   # Prometheus verisi → _apply()
+    _tech_ready   = pyqtSignal(dict)   # kubectl çıktıları → _apply_technical()
+
     def __init__(self, db, ops, parent=None):
         super().__init__(parent)
         self.db  = db
@@ -7100,6 +7105,9 @@ class DashboardPanel(QWidget):
         self._MAX_PTS = 72          # 6 dk @ 5 sn
         self._has_mpl = False
         self._fill = None
+        # Sinyalleri bağla (her zaman main thread'de çalışır)
+        self._data_ready.connect(self._apply)
+        self._tech_ready.connect(self._apply_technical)
         self._build_ui()
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._refresh)
@@ -7414,28 +7422,26 @@ class DashboardPanel(QWidget):
         except Exception:
             data["ts_pred"] = []
 
-        # ── Grafik + kart güncellemesi: Prometheus verisi hazır → hemen uygula ──
-        # kubectl beklemeyi gerektirmez; pods/keda ayrı thread'de devam eder.
-        import datetime as _dt
+        # ── Grafik + kart güncellemesi: Prometheus verisi hazır → sinyal ile uygula
+        import datetime as _dt, socket as _sock
         data["ts_now"] = _dt.datetime.now().strftime("%H:%M:%S")
         data.setdefault("pods", 0)
         data.setdefault("keda_ok", False)
         data.setdefault("keda_txt", "—")
         # Servis canlılık (hızlı TCP)
-        import socket
         for key, host, port in [
             ("prometheus", "127.0.0.1", 9090),
             ("pushgw",     "127.0.0.1", 9091),
             ("app",        "127.0.0.1", int(self.db.get_setting("active_project_port", "8080"))),
         ]:
             try:
-                s = socket.create_connection((host, port), timeout=1)
+                s = _sock.create_connection((host, port), timeout=1)
                 s.close()
                 data[f"svc_{key}"] = True
             except Exception:
                 data[f"svc_{key}"] = False
-        # Grafiği hemen güncelle (kubectl beklemeden)
-        QTimer.singleShot(0, lambda: self._apply(data))
+        # sinyal ile main thread'de güvenli güncelleme (kubectl beklemeden)
+        self._data_ready.emit(dict(data))
 
         # ── Arka planda: pod sayısı + KEDA (kubectl yavaş olabilir) ──────────
         def _fetch_k8s():
@@ -7457,12 +7463,12 @@ class DashboardPanel(QWidget):
             except Exception:
                 keda_ok  = False
                 keda_txt = "—"
-            k8s = dict(data)   # mevcut veriyi kopyala
+            k8s = dict(data)
             k8s["pods"]     = pods
             k8s["keda_ok"]  = keda_ok
             k8s["keda_txt"] = keda_txt
             k8s["ts_now"]   = _dt.datetime.now().strftime("%H:%M:%S")
-            QTimer.singleShot(0, lambda: self._apply(k8s))
+            self._data_ready.emit(k8s)   # sinyal — main thread'de çalışır
 
         import threading as _th
         _th.Thread(target=_fetch_k8s, daemon=True).start()
@@ -8737,7 +8743,7 @@ class DashboardPanel(QWidget):
             instance = self.ops.get_instance()
             ns = instance.get("namespace", "autoscaleops") if instance else "autoscaleops"
 
-            # ── Prometheus (hızlı — bloğu bekleme) ───────────────────────
+            # ── Prometheus (hızlı, kubectl beklemeden) ───────────────────
             prom_src = "Prometheus'a bağlanılamıyor (port 9090)"
             try:
                 for _src, _q in self._RPS_QUERIES:
@@ -8749,7 +8755,6 @@ class DashboardPanel(QWidget):
                         break
             except Exception as e:
                 prom_src = f"Hata: {e}"
-            QTimer.singleShot(0, lambda: self._tech_prom.setPlainText(prom_src))
 
             # ── Activity log (hızlı — DB) ─────────────────────────────────
             try:
@@ -8763,7 +8768,6 @@ class DashboardPanel(QWidget):
                 log_out = "\n".join(log_lines) if log_lines else "(henüz aktivite yok)"
             except Exception:
                 log_out = "(DB hatası)"
-            QTimer.singleShot(0, lambda: self._tech_log.setPlainText(log_out))
 
             # ── kubectl komutları PARALEL ─────────────────────────────────
             def _get_pods():
@@ -8789,27 +8793,41 @@ class DashboardPanel(QWidget):
                 lines = (out or "").strip().splitlines()[-15:]
                 return "\n".join(lines) or "(olay yok)"
 
-            with _cf.ThreadPoolExecutor(max_workers=3) as ex:
+            with _cf.ThreadPoolExecutor(max_workers=4) as ex:
                 f_pods   = ex.submit(_get_pods)
                 f_svc    = ex.submit(_get_svc)
                 f_hpa    = ex.submit(_get_hpa)
                 f_events = ex.submit(_get_events)
-                pods_out    = f_pods.result()
-                svc_out     = f_svc.result()
+                pods_out     = f_pods.result()
+                svc_out      = f_svc.result()
                 hpa_combined = f_hpa.result()
-                ev_out      = f_events.result()
+                ev_out       = f_events.result()
 
             now_str = _dt.datetime.now().strftime("%H:%M:%S")
-            QTimer.singleShot(0, lambda: self._tech_pods.setPlainText(pods_out))
-            QTimer.singleShot(0, lambda: self._tech_svc.setPlainText(svc_out))
-            QTimer.singleShot(0, lambda: self._tech_hpa.setPlainText(hpa_combined))
-            QTimer.singleShot(0, lambda: self._tech_events.setPlainText(ev_out))
-            QTimer.singleShot(0, lambda: self._tech_status_lbl.setText(
-                f"Son güncelleme: {now_str}  •  ns: {ns}"
-            ))
+            # sinyal ile main thread'de güvenli güncelleme
+            self._tech_ready.emit({
+                "pods":   pods_out,
+                "svc":    svc_out,
+                "hpa":    hpa_combined,
+                "prom":   prom_src,
+                "events": ev_out,
+                "log":    log_out,
+                "status": f"Son güncelleme: {now_str}  •  ns: {ns}",
+            })
 
         import threading
         threading.Thread(target=do, daemon=True).start()
+
+    @pyqtSlot(dict)
+    def _apply_technical(self, results: dict):
+        """_tech_ready sinyalini yakalar — her zaman main thread'de çalışır."""
+        self._tech_pods.setPlainText(results.get("pods", ""))
+        self._tech_svc.setPlainText(results.get("svc", ""))
+        self._tech_hpa.setPlainText(results.get("hpa", ""))
+        self._tech_prom.setPlainText(results.get("prom", ""))
+        self._tech_events.setPlainText(results.get("events", ""))
+        self._tech_log.setPlainText(results.get("log", ""))
+        self._tech_status_lbl.setText(results.get("status", ""))
 
     # ── External update hooks (called from MainWindow workers) ─────────────
     def update_metrics(self, data: dict):
