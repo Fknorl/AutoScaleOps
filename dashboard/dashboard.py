@@ -1093,6 +1093,22 @@ def main():
             </div>"""
         st.markdown(f'<div class="upcoming-strip">{chips}</div>', unsafe_allow_html=True)
 
+    # ── PROMETHEUS BAĞLANTI KONTROLÜ ─────────────────────────────────────────
+    _prom_ok = False
+    try:
+        _pr = requests.get(f"{URLS['prometheus']}/-/ready", timeout=2)
+        _prom_ok = _pr.ok
+    except Exception:
+        pass
+
+    if not _prom_ok:
+        st.error(
+            "⚠️ **Prometheus'a bağlanılamıyor** (localhost:9090)  \n\n"
+            "Port-forward aktif değil veya kesilmiş.  \n"
+            "AutoScaleOps masaüstü uygulamasından **Başlat** butonuna basın  \n"
+            "veya Sorun Giderici → **🚀 Tüm Hataları Düzelt** kullanın."
+        )
+
     # ── METRICS ──────────────────────────────────────────────────────────────
     # Farklı framework'ler farklı metrik adları kullanır.
     # Sırayla dene: http_requests_total → flask_http_request_total → nginx

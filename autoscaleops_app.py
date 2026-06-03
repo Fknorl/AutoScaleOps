@@ -1851,8 +1851,23 @@ class SystemOps:
 
             # Proc canlı ve port açık → zaten çalışıyor, portu kaydet ve geç
             if existing and existing.poll() is None and self._is_port_open(preferred):
-                used_ports.add(preferred)
-                continue
+                if key == "app":
+                    # App için TCP yetmez; gerçek HTTP isteği çalışıyor mu kontrol et
+                    # (Pod yeniden başladığında port-forward süreci "canlı" görünür ama HTTP timeout verir)
+                    _base = f"http://localhost:{preferred}"
+                    _http_ok = (self._http_ok(f"{_base}/") or
+                                self._http_ok(f"{_base}/health"))
+                    if _http_ok:
+                        used_ports.add(preferred)
+                        continue
+                    # HTTP çalışmıyor → kırık process'i zorla öldür, yeniden başlat
+                    try:
+                        existing.terminate()
+                    except Exception:
+                        pass
+                else:
+                    used_ports.add(preferred)
+                    continue
 
             # Proc'u temizle
             if existing:
@@ -1913,6 +1928,18 @@ class SystemOps:
                 pass
         self._port_forward_procs.clear()
         run_ps("Get-Process -Name kubectl -ErrorAction SilentlyContinue | Stop-Process -Force 2>&1")
+
+    def _wait_for_port(self, port: int, timeout: int = 10) -> bool:
+        """Port TCP seviyesinde dinlenene kadar bekle (max timeout saniye).
+        Port-forward process başlatıldıktan sonra hazır olması için kullanılır.
+        """
+        import time as _t
+        deadline = _t.time() + timeout
+        while _t.time() < deadline:
+            if self._is_port_open(port):
+                return True
+            _t.sleep(0.4)
+        return False
 
     def get_port_forward_status(self) -> Dict[str, bool]:
         result = {}
@@ -6085,6 +6112,7 @@ class ActivityLogPanel(QWidget):
     def __init__(self, db, parent=None):
         super().__init__(parent)
         self.db = db
+        self._last_log_id = 0
         lay = QVBoxLayout(self)
         lay.setContentsMargins(32, 32, 32, 32)
         lay.setSpacing(16)
@@ -6093,7 +6121,7 @@ class ActivityLogPanel(QWidget):
         title.setStyleSheet(
             f"color:{C_TEXT}; font-size:20px; font-weight:700; background:transparent; border:none;"
         )
-        sub = QLabel("Sistem olayları ve işlem geçmişi")
+        sub = QLabel("Sistem olayları ve işlem geçmişi — otomatik yenilenir")
         sub.setStyleSheet(
             f"color:{C_TEXT_DIM}; font-size:12px; background:transparent; border:none;"
         )
@@ -6104,14 +6132,63 @@ class ActivityLogPanel(QWidget):
         self._log.setMinimumHeight(400)
         lay.addWidget(self._log, 1)
 
+        btn_row = QHBoxLayout()
+        btn_refresh = QPushButton("🔄 Yenile")
+        btn_refresh.setFixedHeight(36)
+        btn_refresh.setFixedWidth(100)
+        btn_refresh.clicked.connect(self._force_reload)
         btn_clear = QPushButton("Logu Temizle")
         btn_clear.setFixedHeight(36)
         btn_clear.setFixedWidth(140)
-        btn_clear.clicked.connect(self._log.clear)
-        btn_row = QHBoxLayout()
+        btn_clear.clicked.connect(self._clear_log)
         btn_row.addStretch()
+        btn_row.addWidget(btn_refresh)
         btn_row.addWidget(btn_clear)
         lay.addLayout(btn_row)
+
+        # DB'den ilk yükleme (UI hazır olduktan 200ms sonra)
+        from PyQt6.QtCore import QTimer
+        QTimer.singleShot(200, self._load_from_db)
+        # Her 4 saniyede otomatik yenile (yeni loglar gelince güncelle)
+        self._refresh_timer = QTimer(self)
+        self._refresh_timer.timeout.connect(self._load_from_db)
+        self._refresh_timer.start(4000)
+
+    def _load_from_db(self):
+        """DB'deki yeni log kayıtlarını widget'a ekle."""
+        try:
+            entries = self.db.get_activity_log(limit=300)
+            # id'ye göre büyükten küçüğe geliyor (ORDER BY id DESC);
+            # sadece daha önce gösterilmeyenleri al
+            new = [e for e in entries if e.get("id", 0) > self._last_log_id]
+            if not new:
+                return
+            for entry in reversed(new):   # eskiden yeniye ekle
+                ts    = (entry.get("timestamp") or "")[:19]
+                etype = (entry.get("event_type") or "info").lower()
+                desc  = (entry.get("description") or "").strip()
+                if not desc:
+                    continue
+                if any(k in etype for k in ("error", "fail", "hata")):
+                    level = "error"
+                elif any(k in etype for k in ("deploy", "success", "start", "launch", "basalt")):
+                    level = "success"
+                else:
+                    level = "info"
+                self._log.append_line(f"[{ts}] [{etype.upper()}] {desc}", level)
+                self._last_log_id = max(self._last_log_id, entry.get("id", 0))
+        except Exception:
+            pass
+
+    def _force_reload(self):
+        """Tüm logları sıfırdan yükle."""
+        self._last_log_id = 0
+        self._log.clear()
+        self._load_from_db()
+
+    def _clear_log(self):
+        self._log.clear()
+        self._last_log_id = 0
 
     def append_line(self, msg: str, level: str = "info"):
         self._log.append_line(msg, level)
@@ -6489,28 +6566,38 @@ class TroubleshooterPanel(QWidget):
         top_row.addWidget(badge_lbl)
         top_row.addWidget(check_lbl)
         top_row.addStretch()
+        _result_lbl = None
         if status in ("warn", "error") and res.get("fix"):
             fix_btn = QPushButton("⚡ Duzelt")
             fix_btn.setObjectName("btn_warning")
             fix_btn.setFixedHeight(28)
             fix_btn.setMinimumWidth(90)
-            fix_btn.clicked.connect(lambda checked, r=res, b=fix_btn: self._direct_fix(r, b))
+            _result_lbl = QLabel("")
+            _result_lbl.setStyleSheet(f"color:{C_TEXT_DIM}; font-size:11px;")
+            _result_lbl.setWordWrap(True)
+            fix_btn.clicked.connect(
+                lambda checked, r=res, b=fix_btn, rl=_result_lbl: self._direct_fix(r, b, rl)
+            )
             top_row.addWidget(fix_btn)
         fl.addLayout(top_row)
         msg_lbl = QLabel(res.get("message", ""))
         msg_lbl.setStyleSheet(f"color:{C_TEXT_DIM}; font-size:12px;")
         msg_lbl.setWordWrap(True)
         fl.addWidget(msg_lbl)
+        if _result_lbl is not None:
+            fl.addWidget(_result_lbl)
         return f
 
     # ── Direkt Otomatik Düzeltme ──────────────────────────────────────────────
 
-    def _direct_fix(self, res: dict, btn: "QPushButton"):
-        """Dialog açmadan arka planda fix uygular; butonu günceller."""
-        fix_cmd   = res.get("fix", "")
+    def _direct_fix(self, res: dict, btn: "QPushButton", result_lbl=None):
+        """Dialog açmadan arka planda fix uygular; butonu ve sonuç etiketini günceller."""
+        fix_cmd    = res.get("fix", "")
         check_name = res.get("check", "")
         btn.setEnabled(False)
         btn.setText("⏳")
+        if result_lbl:
+            result_lbl.setText("⏳ Düzeltme uygulanıyor…")
 
         def worker():
             ok, out = False, ""
@@ -6518,40 +6605,49 @@ class TroubleshooterPanel(QWidget):
                 inst = self.ops.get_instance()
                 ns   = inst.get("namespace", "autoscaleops") if inst else "autoscaleops"
 
-                if "App (localhost:8080)" in check_name:
+                if any(k in check_name for k in ("App (localhost:8080)", "Port Forwards")):
+                    # Kırık eski process'leri ZORLA öldür → temiz başlat
+                    self.ops.stop_port_forwards()
+                    import time; time.sleep(1.5)   # OS portları serbest bıraksın
                     self.ops.start_port_forwards(ns)
-                    import time; time.sleep(2)
-                    ok  = self.ops.check_app()
-                    out = "Port-forward yeniden başlatıldı" if ok else "Bağlanamadı"
+                    # Port açılana kadar bekle (max 12 sn)
+                    app_port = int(self.ops.db.get_setting("active_project_port", "8080"))
+                    ok = self.ops._wait_for_port(app_port, timeout=12)
+                    if ok:
+                        ok  = self.ops.check_app()
+                        out = f"Port-forward başarıyla yeniden başlatıldı ✓ (:{app_port})"
+                    else:
+                        out = (f"Port-forward başlatılamadı — "
+                               f"kubectl port-forward svc çıkışını kontrol edin")
 
                 elif "Prometheus (" in check_name:
+                    self.ops.stop_port_forwards()
+                    import time; time.sleep(1.5)
                     self.ops.start_port_forwards(ns)
-                    import time; time.sleep(2)
-                    ok  = self.ops.check_prometheus()
-                    out = "Prometheus port-forward başlatıldı"
+                    ok  = self.ops._wait_for_port(9090, timeout=12)
+                    if ok: ok = self.ops.check_prometheus()
+                    out = "Prometheus port-forward hazır ✓" if ok else "Prometheus'a erişilemiyor"
 
                 elif "Pushgateway" in check_name:
+                    self.ops.stop_port_forwards()
+                    import time; time.sleep(1.5)
                     self.ops.start_port_forwards(ns)
-                    import time; time.sleep(2)
-                    ok  = self.ops.check_pushgateway()
-                    out = "Pushgateway port-forward başlatıldı"
-
-                elif "Port Forwards" in check_name:
-                    self.ops.start_port_forwards(ns)
-                    import time; time.sleep(2)
-                    ok  = True
-                    out = "Port-forward'lar yeniden başlatıldı"
+                    ok  = self.ops._wait_for_port(9091, timeout=12)
+                    if ok: ok = self.ops.check_pushgateway()
+                    out = "Pushgateway port-forward hazır ✓" if ok else "Pushgateway'e erişilemiyor"
 
                 elif "Scraping" in check_name:
                     proj = self.db.get_active_project()
                     proj_name = proj["name"] if proj and proj.get("name") else "app"
                     self.ops.apply_scrape_config(ns, proj_name)
                     ok  = True
-                    out = "ServiceMonitor oluşturuldu"
+                    out = "ServiceMonitor oluşturuldu ✓"
 
                 elif fix_cmd and not any(fix_cmd.startswith(t) for t in (
                         "Close", "Free", "Ensure", "Run setup", "Start Docker")):
                     ok, out = run_ps(fix_cmd, timeout=60)
+                    if not out.strip():
+                        out = "Komut çalıştırıldı"
 
                 else:
                     ok  = False
@@ -6561,13 +6657,13 @@ class TroubleshooterPanel(QWidget):
                 ok, out = False, str(exc)
 
             from PyQt6.QtCore import QTimer as _QT
-            _QT.singleShot(0, lambda: self._fix_done(btn, ok, out))
+            _QT.singleShot(0, lambda: self._fix_done(btn, ok, out, result_lbl))
 
         import threading
         threading.Thread(target=worker, daemon=True).start()
 
     @pyqtSlot()
-    def _fix_done(self, btn: "QPushButton", ok: bool, msg: str):
+    def _fix_done(self, btn: "QPushButton", ok: bool, msg: str, result_lbl=None):
         btn.setEnabled(True)
         if ok:
             btn.setText("✅ Düzeltildi")
@@ -6575,6 +6671,9 @@ class TroubleshooterPanel(QWidget):
                 "background:#1a3a2a; color:#30D158; border:1px solid #30D158;"
                 " border-radius:4px; padding:0 8px;"
             )
+            if result_lbl:
+                result_lbl.setText(f"✅ {msg}")
+                result_lbl.setStyleSheet(f"color:#30D158; font-size:11px; padding-left:6px;")
         else:
             btn.setText("❌ Başarısız")
             btn.setToolTip(msg[:300])
@@ -6582,6 +6681,9 @@ class TroubleshooterPanel(QWidget):
                 "background:#3a1a1a; color:#FF453A; border:1px solid #FF453A;"
                 " border-radius:4px; padding:0 8px;"
             )
+            if result_lbl:
+                result_lbl.setText(f"❌ {msg[:180]}")
+                result_lbl.setStyleSheet(f"color:#FF453A; font-size:11px; padding-left:6px;")
 
     # ── Tüm Hataları Düzelt ──────────────────────────────────────────────────
 
@@ -6615,8 +6717,15 @@ class TroubleshooterPanel(QWidget):
                     if any(k in check_name for k in
                            ("App (localhost:8080)", "Port Forwards", "Prometheus (", "Pushgateway")):
                         if not _pf_done:
+                            # Kırık process'leri temizle, temiz başlat
+                            self.ops.stop_port_forwards()
+                            time.sleep(1.5)
                             self.ops.start_port_forwards(ns)
-                            time.sleep(2)
+                            # Port açılana kadar bekle
+                            self.ops._wait_for_port(
+                                int(self.ops.db.get_setting("active_project_port", "8080")),
+                                timeout=12
+                            )
                             _pf_done = True
 
                     elif "Scraping" in check_name:
