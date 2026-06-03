@@ -10667,6 +10667,19 @@ class DeployPanel(QWidget):
             self._deploy_log.append_line("❌  Klasör bulunamadı.", "error")
             return
 
+        # KRITIK: Adı Docker/K8s uyumlu formata dönüştür (Türkçe harf, boşluk vb.)
+        # deploy_app() içinde de yapılıyor ama DB kaydetme burada name'i kullandığından
+        # önce sanitize etmek şart — aksi hâlde K8s servisi "yeni-klasor-service" iken
+        # DB "yeni-klasör-service" kaydeder ve port-forward asla bulunamaz.
+        safe_name = _sanitize_docker_name(name)
+        if safe_name != name:
+            self._deploy_log.append_line(
+                f"ℹ️  Proje adı düzeltildi: '{name}' → '{safe_name}' (Docker/K8s uyumu)",
+                "info"
+            )
+            self._deploy_name.setText(safe_name)
+            name = safe_name
+
         # Eğer validasyon yoksa çalıştır, varsa mevcut sonucu kullan
         analysis = self._last_analysis or _analyze_project(folder)
 
@@ -10695,10 +10708,9 @@ class DeployPanel(QWidget):
             ok, msg = self.ops.deploy_app(folder, name, port, self._deploy_log.append_line)
             if ok:
                 # DB güncellemeleri thread'den yapılabilir (mutex'li SQLite)
+                # name zaten sanitize edildi → K8s servis adıyla eşleşir
                 self.db.add_project(name, folder, port, f"{name}-service", f"{name}:latest")
-                current_active = self.db.get_setting("active_project_name", "")
-                if not current_active or current_active == "autoscaleops-app":
-                    self.db.set_active_project(name)
+                self.db.set_active_project(name)
                 self.db.set_setting("active_project_port",    str(port))
                 self.db.set_setting("active_project_name",    name)
                 self.db.set_setting("active_project_service", f"{name}-service")
