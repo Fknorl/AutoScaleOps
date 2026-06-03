@@ -2348,6 +2348,15 @@ spec:
                 return False, f"kubectl apply hatası: {out}"
         emit("       ✅  Deployment ve Service oluşturuldu.", "ok")
 
+        # ── Adım 4.5: Image güncelleme zorla ─────────────────────────────
+        # kubectl apply sadece spec değişince pod restart eder.
+        # Aynı tag (latest) ile build edilmiş yeni image için set image gerekli.
+        run_ps(
+            f"kubectl set image deployment/{name}-deployment "
+            f"{name}={name}:latest -n {namespace} 2>&1",
+            timeout=30
+        )
+
         # ── Adım 5: Pod Readiness ─────────────────────────────────────────
         emit("[5/7]  Pod'lar hazır olana kadar bekleniyor (maks. 3 dk)…", "info")
         ok, out = run_ps(
@@ -2426,6 +2435,7 @@ spec:
         self.db.set_active_project(name)   # projects.is_active + settings günceller
         _write_active_project_json(name, port, f"{name}-service")
         self.stop_port_forwards()
+        time.sleep(2)   # OS'un eski kubectl bağlantılarını kapatması için bekle
         self.start_port_forwards(namespace)
         emit("       ✅  Port forward aktif.", "ok")
 
