@@ -1172,7 +1172,19 @@ def main():
         auto_r = st.checkbox("Auto-refresh 3s", value=st.session_state.auto_refresh, key="auto_r_chk")
         st.session_state.auto_refresh = auto_r
 
-    ts_real = fetch_timeseries("sum(rate(http_requests_total[1m]))", 30, "30s")
+    # ── Timeseries: _get_app_rps() ile aynı kaynağı kullan (tutarlılık için)
+    if _metrics_source == "flask_http_request_total":
+        _rps_ts_query = "sum(rate(flask_http_request_total[1m]))"
+    elif _metrics_source == "nginx_requests_total":
+        _rps_ts_query = "sum(rate(nginx_requests_total[1m]))"
+    elif _metrics_source in ("http_requests_total (all)", "none"):
+        _rps_ts_query = "sum(rate(http_requests_total[1m]))"
+    else:  # "http_requests_total" — filtered (kube/apiserver hariç)
+        _rps_ts_query = (
+            'sum(rate(http_requests_total{job!~"kubernetes-apiservers|apiserver|kube-apiserver"'
+            ',service!~".*kube.*|.*prometheus.*|.*coredns.*"}[1m]))'
+        )
+    ts_real = fetch_timeseries(_rps_ts_query, 30, "30s")
     ts_pred = fetch_timeseries("predicted_rps_30min", 30, "30s")
 
     chart_df = pd.DataFrame()

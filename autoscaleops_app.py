@@ -2838,10 +2838,15 @@ spec:
         chk("Pushgateway (localhost:9091)", pg, "Pushgateway reachable" if pg else "Cannot reach Pushgateway",
             "kubectl port-forward svc/prometheus-pushgateway 9091:9091 -n monitoring" if not pg else None)
 
-        # 7. App
+        # 7. App — servis adı aktif projeden alınır (dinamik)
         app_ok = self.check_app()
+        try:
+            _proj = self.db.get_active_project()
+            svc_name = f"{_proj['name']}-service" if _proj and _proj.get("name") else "autoscaleops-app-service"
+        except Exception:
+            svc_name = "autoscaleops-app-service"
         chk("App (localhost:8080)", app_ok, "App reachable" if app_ok else "Cannot reach app",
-            f"kubectl port-forward svc/autoscaleops-app-service 8080:8080 -n {namespace}" if not app_ok else None)
+            f"kubectl port-forward svc/{svc_name} 8080:8080 -n {namespace}" if not app_ok else None)
 
         # 8. Dashboard
         dash_ok = self.check_dashboard()
@@ -2859,14 +2864,19 @@ spec:
         except Exception:
             chk("Prometheus Scraping App", False, "Cannot check — Prometheus unreachable", None)
 
-        # 10. http_requests_total metric
+        # 10. Metrik kontrolü — http_requests_total VEYA flask_http_request_total
         try:
-            r = requests.get("http://localhost:9090/api/v1/query",
-                             params={"query": "http_requests_total"}, timeout=3)
-            res = r.json().get("data", {}).get("result", [])
-            chk("http_requests_total metric", len(res) > 0,
-                "Metric found in Prometheus" if res else "Metric not found — is app running?",
-                "Ensure the app is running and Prometheus is scraping it" if not res else None)
+            _metric_ok = False
+            _metric_msg = "Metric not found — is app running?"
+            for _mq in ["http_requests_total", "flask_http_request_total"]:
+                _r = requests.get("http://localhost:9090/api/v1/query",
+                                  params={"query": _mq}, timeout=3)
+                if _r.ok and _r.json().get("data", {}).get("result"):
+                    _metric_ok = True
+                    _metric_msg = f"Metric found: {_mq}"
+                    break
+            chk("http_requests_total metric", _metric_ok, _metric_msg,
+                f"kubectl apply -f charts/autoscaleops/templates/ -n {namespace}" if not _metric_ok else None)
         except Exception:
             chk("http_requests_total metric", False, "Cannot check — Prometheus unreachable", None)
 
@@ -6224,16 +6234,25 @@ class TroubleshooterPanel(QWidget):
         lay.addWidget(hdr)
         lay.addWidget(sub)
 
-        # ── Hizli tani butonu
+        # ── Hizli tani + otomatik duzelt butonlari
         btn_row = QHBoxLayout()
+        btn_row.setSpacing(8)
         self._btn_run_diag = QPushButton("🔍  Tam Tani Calistir")
         self._btn_run_diag.setObjectName("btn_primary")
         self._btn_run_diag.setFixedHeight(40)
         self._btn_run_diag.clicked.connect(self._run_diagnostics)
+
+        self._btn_fix_all = QPushButton("🚀  Tüm Hataları Düzelt")
+        self._btn_fix_all.setObjectName("btn_success")
+        self._btn_fix_all.setFixedHeight(40)
+        self._btn_fix_all.clicked.connect(self._auto_fix_all)
+
         btn_export = QPushButton("📄  Rapor Aktar")
         btn_export.setFixedHeight(40)
         btn_export.clicked.connect(self._export_report)
+
         btn_row.addWidget(self._btn_run_diag)
+        btn_row.addWidget(self._btn_fix_all)
         btn_row.addWidget(btn_export)
         btn_row.addStretch()
         lay.addLayout(btn_row)
@@ -6471,11 +6490,11 @@ class TroubleshooterPanel(QWidget):
         top_row.addWidget(check_lbl)
         top_row.addStretch()
         if status in ("warn", "error") and res.get("fix"):
-            fix_btn = QPushButton("Duzelt")
+            fix_btn = QPushButton("⚡ Duzelt")
             fix_btn.setObjectName("btn_warning")
             fix_btn.setFixedHeight(28)
-            fix_str = res["fix"]
-            fix_btn.clicked.connect(lambda checked, cmd=fix_str: self._show_fix(cmd))
+            fix_btn.setMinimumWidth(90)
+            fix_btn.clicked.connect(lambda checked, r=res, b=fix_btn: self._direct_fix(r, b))
             top_row.addWidget(fix_btn)
         fl.addLayout(top_row)
         msg_lbl = QLabel(res.get("message", ""))
@@ -6483,6 +6502,153 @@ class TroubleshooterPanel(QWidget):
         msg_lbl.setWordWrap(True)
         fl.addWidget(msg_lbl)
         return f
+
+    # ── Direkt Otomatik Düzeltme ──────────────────────────────────────────────
+
+    def _direct_fix(self, res: dict, btn: "QPushButton"):
+        """Dialog açmadan arka planda fix uygular; butonu günceller."""
+        fix_cmd   = res.get("fix", "")
+        check_name = res.get("check", "")
+        btn.setEnabled(False)
+        btn.setText("⏳")
+
+        def worker():
+            ok, out = False, ""
+            try:
+                inst = self.ops.get_instance()
+                ns   = inst.get("namespace", "autoscaleops") if inst else "autoscaleops"
+
+                if "App (localhost:8080)" in check_name:
+                    self.ops.start_port_forwards(ns)
+                    import time; time.sleep(2)
+                    ok  = self.ops.check_app()
+                    out = "Port-forward yeniden başlatıldı" if ok else "Bağlanamadı"
+
+                elif "Prometheus (" in check_name:
+                    self.ops.start_port_forwards(ns)
+                    import time; time.sleep(2)
+                    ok  = self.ops.check_prometheus()
+                    out = "Prometheus port-forward başlatıldı"
+
+                elif "Pushgateway" in check_name:
+                    self.ops.start_port_forwards(ns)
+                    import time; time.sleep(2)
+                    ok  = self.ops.check_pushgateway()
+                    out = "Pushgateway port-forward başlatıldı"
+
+                elif "Port Forwards" in check_name:
+                    self.ops.start_port_forwards(ns)
+                    import time; time.sleep(2)
+                    ok  = True
+                    out = "Port-forward'lar yeniden başlatıldı"
+
+                elif "Scraping" in check_name:
+                    proj = self.db.get_active_project()
+                    proj_name = proj["name"] if proj and proj.get("name") else "app"
+                    self.ops.apply_scrape_config(ns, proj_name)
+                    ok  = True
+                    out = "ServiceMonitor oluşturuldu"
+
+                elif fix_cmd and not any(fix_cmd.startswith(t) for t in (
+                        "Close", "Free", "Ensure", "Run setup", "Start Docker")):
+                    ok, out = run_ps(fix_cmd, timeout=60)
+
+                else:
+                    ok  = False
+                    out = "Bu hata otomatik düzeltilemez — lütfen manuel müdahale edin."
+
+            except Exception as exc:
+                ok, out = False, str(exc)
+
+            from PyQt6.QtCore import QTimer as _QT
+            _QT.singleShot(0, lambda: self._fix_done(btn, ok, out))
+
+        import threading
+        threading.Thread(target=worker, daemon=True).start()
+
+    @pyqtSlot()
+    def _fix_done(self, btn: "QPushButton", ok: bool, msg: str):
+        btn.setEnabled(True)
+        if ok:
+            btn.setText("✅ Düzeltildi")
+            btn.setStyleSheet(
+                "background:#1a3a2a; color:#30D158; border:1px solid #30D158;"
+                " border-radius:4px; padding:0 8px;"
+            )
+        else:
+            btn.setText("❌ Başarısız")
+            btn.setToolTip(msg[:300])
+            btn.setStyleSheet(
+                "background:#3a1a1a; color:#FF453A; border:1px solid #FF453A;"
+                " border-radius:4px; padding:0 8px;"
+            )
+
+    # ── Tüm Hataları Düzelt ──────────────────────────────────────────────────
+
+    def _auto_fix_all(self):
+        """Tüm HATA / UYARI satırlarını sırayla düzeltir."""
+        errors = [r for r in self._diag_results if r.get("status") in ("error", "warn")]
+        if not errors:
+            QMessageBox.information(self, "Bilgi", "Düzeltilecek hata bulunamadı.\n"
+                                    "Önce 'Tam Tanı Çalıştır' butonuna basın.")
+            return
+
+        self._btn_fix_all.setEnabled(False)
+        self._btn_fix_all.setText(f"⏳  0/{len(errors)} düzeltiliyor…")
+
+        def worker():
+            inst     = self.ops.get_instance()
+            ns       = inst.get("namespace", "autoscaleops") if inst else "autoscaleops"
+            _pf_done = False  # port-forward bir kez başlatılsın yeter
+
+            for i, res in enumerate(errors):
+                from PyQt6.QtCore import QTimer as _QT
+                idx = i
+                _QT.singleShot(0, lambda _i=idx: self._btn_fix_all.setText(
+                    f"⏳  {_i + 1}/{len(errors)} düzeltiliyor…"
+                ))
+
+                fix_cmd    = res.get("fix", "")
+                check_name = res.get("check", "")
+                try:
+                    import time
+                    if any(k in check_name for k in
+                           ("App (localhost:8080)", "Port Forwards", "Prometheus (", "Pushgateway")):
+                        if not _pf_done:
+                            self.ops.start_port_forwards(ns)
+                            time.sleep(2)
+                            _pf_done = True
+
+                    elif "Scraping" in check_name:
+                        proj = self.db.get_active_project()
+                        proj_name = proj["name"] if proj and proj.get("name") else "app"
+                        self.ops.apply_scrape_config(ns, proj_name)
+
+                    elif "Minikube" in check_name:
+                        profile = inst.get("minikube_profile", "autoscaleops") if inst else "autoscaleops"
+                        run_ps(f"minikube start -p {profile} --driver=docker", timeout=180)
+
+                    elif fix_cmd and not any(fix_cmd.startswith(t) for t in (
+                            "Close", "Free", "Ensure", "Run setup", "Start Docker")):
+                        run_ps(fix_cmd, timeout=60)
+
+                except Exception:
+                    pass
+
+            from PyQt6.QtCore import QTimer as _QT
+            _QT.singleShot(0, self._fix_all_done)
+
+        import threading
+        threading.Thread(target=worker, daemon=True).start()
+
+    @pyqtSlot()
+    def _fix_all_done(self):
+        self._btn_fix_all.setEnabled(True)
+        self._btn_fix_all.setText("🚀  Tüm Hataları Düzelt")
+        # Tanıyı yeniden çalıştır
+        self._run_diagnostics()
+
+    # ─────────────────────────────────────────────────────────────────────────
 
     def _show_fix(self, fix: str):
         dlg = QDialog(self)
