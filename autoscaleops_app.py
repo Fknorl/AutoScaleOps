@@ -2023,18 +2023,26 @@ class SystemOps:
 
     # -- Prometheus metrics -----------------------
     def get_current_rps(self) -> float:
-        try:
-            r = requests.get(
-                "http://localhost:9090/api/v1/query",
-                params={"query": "sum(rate(http_requests_total[1m]))"},
-                timeout=3
-            )
-            data = r.json()
-            result = data.get("data", {}).get("result", [])
-            if result:
-                return float(result[0]["value"][1])
-        except Exception:
-            pass
+        """Anlık RPS — birden fazla metrik kaynağı sırayla dener."""
+        _queries = [
+            "sum(rate(flask_http_request_total[1m]))",
+            'sum(rate(http_requests_total{job!~"kubernetes-apiservers|pushgateway|kube-state-metrics"}[1m]))',
+            "sum(rate(http_requests_total[1m]))",
+        ]
+        for _q in _queries:
+            try:
+                r = requests.get(
+                    "http://localhost:9090/api/v1/query",
+                    params={"query": _q},
+                    timeout=3
+                )
+                result = r.json().get("data", {}).get("result", [])
+                if result:
+                    v = float(result[0]["value"][1])
+                    if v >= 0:
+                        return v
+            except Exception:
+                continue
         return 0.0
 
     def get_pod_count(self) -> int:
@@ -7325,18 +7333,58 @@ class DashboardPanel(QWidget):
         import threading
         threading.Thread(target=self._fetch_and_apply, daemon=True).start()
 
+    # Sırayla denenen RPS metrik kaynakları — farklı framework/config'lere uyumlu
+    _RPS_QUERIES = [
+        ("flask",    "sum(rate(flask_http_request_total[1m]))"),
+        ("filtered", 'sum(rate(http_requests_total{job!~"kubernetes-apiservers|pushgateway|kube-state-metrics"}[1m]))'),
+        ("all",      "sum(rate(http_requests_total[1m]))"),
+        ("nginx",    "sum(rate(nginx_http_requests_total[1m]))"),
+    ]
+
+    def _fetch_rps_robust(self, _req) -> tuple:
+        """Birden fazla metrik kaynağı dener; ilk başarılıyı döner (rps_float, src_str)."""
+        for _src, _q in self._RPS_QUERIES:
+            try:
+                r = _req.get(self.PROM_URL, params={"query": _q}, timeout=2)
+                res = r.json().get("data", {}).get("result", [])
+                if res:
+                    v = float(res[0]["value"][1])
+                    if v >= 0:
+                        return v, _src
+            except Exception:
+                continue
+        return 0.0, "none"
+
+    def _fetch_ts_robust(self, _req, now) -> tuple:
+        """Zaman serisi (son 6 dk) için çoklu kaynak dener."""
+        import datetime as _dt
+        _start = (now - _dt.timedelta(minutes=6)).isoformat() + "Z"
+        _end   = now.isoformat() + "Z"
+        for _src, _q in self._RPS_QUERIES:
+            try:
+                r = _req.get(self.PROM_RANGE_URL, params={
+                    "query": _q, "start": _start, "end": _end, "step": "30s",
+                }, timeout=3)
+                vals = r.json().get("data", {}).get("result", [])
+                if vals and vals[0].get("values"):
+                    pts = vals[0]["values"]
+                    ts_labels = [_dt.datetime.fromtimestamp(float(t)).strftime("%H:%M:%S") for t, _ in pts]
+                    ts_rps    = [float(v) for _, v in pts]
+                    return ts_labels, ts_rps, _src
+            except Exception:
+                continue
+        return [], [], "none"
+
     def _fetch_and_apply(self):
         import datetime, requests as _req
         data = {}
-        try:
-            r = _req.get(self.PROM_URL,
-                         params={"query": 'sum(rate(http_requests_total[1m]))'},
-                         timeout=2)
-            res = r.json().get("data", {}).get("result", [])
-            data["rps"] = float(res[0]["value"][1]) if res else 0.0
-        except Exception:
-            data["rps"] = 0.0
 
+        # ── Anlık RPS (çoklu kaynak) ──────────────────────────────────────
+        rps_val, rps_src = self._fetch_rps_robust(_req)
+        data["rps"] = rps_val
+        data["rps_src"] = rps_src
+
+        # ── AI tahmini ────────────────────────────────────────────────────
         try:
             r = _req.get(self.PROM_URL,
                          params={"query": "predicted_rps_30min"},
@@ -7346,31 +7394,15 @@ class DashboardPanel(QWidget):
         except Exception:
             data["pred"] = 0.0
 
-        # Timeseries (son 6 dakika, 30sn adım)
-        try:
-            now = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
-            r = _req.get(self.PROM_RANGE_URL, params={
-                "query": 'sum(rate(http_requests_total[1m]))',
-                "start": (now - datetime.timedelta(minutes=6)).isoformat() + "Z",
-                "end":   now.isoformat() + "Z",
-                "step":  "30s",
-            }, timeout=3)
-            vals = r.json().get("data", {}).get("result", [])
-            if vals:
-                pts = vals[0].get("values", [])
-                data["ts_time"]  = [datetime.datetime.fromtimestamp(float(t)).strftime("%H:%M:%S")
-                                    for t, _ in pts]
-                data["ts_rps"]   = [float(v) for _, v in pts]
-            else:
-                data["ts_time"] = []
-                data["ts_rps"]  = []
-        except Exception:
-            data["ts_time"] = []
-            data["ts_rps"]  = []
+        # ── Timeseries (son 6 dakika, 30sn adım — çoklu kaynak) ──────────
+        now = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
+        ts_labels, ts_rps, ts_src = self._fetch_ts_robust(_req, now)
+        data["ts_time"] = ts_labels
+        data["ts_rps"]  = ts_rps
+        data["ts_src"]  = ts_src
 
-        # AI prediction timeseries
+        # ── AI prediction timeseries ──────────────────────────────────────
         try:
-            now = datetime.datetime.now(datetime.timezone.utc).replace(tzinfo=None)
             r = _req.get(self.PROM_RANGE_URL, params={
                 "query": "predicted_rps_30min",
                 "start": (now - datetime.timedelta(minutes=6)).isoformat() + "Z",
@@ -7446,33 +7478,60 @@ class DashboardPanel(QWidget):
 
         # Chart
         if self._has_mpl:
-            ts   = data.get("ts_time", [])
+            ts    = data.get("ts_time", [])
             rps_v = data.get("ts_rps",  [])
             pred_v = data.get("ts_pred", [])
+            ts_src = data.get("ts_src", "")
             # Pad pred to same length
             if len(pred_v) < len(rps_v):
                 pred_v = pred_v + [0.0] * (len(rps_v) - len(pred_v))
             xs = list(range(len(rps_v)))
             self._ln_real.set_data(xs, rps_v)
             self._ln_pred.set_data(xs, pred_v[:len(xs)])
+
+            # Mevcut "veri yok" yazısını kaldır
+            if hasattr(self, "_no_data_txt"):
+                try: self._no_data_txt.remove()
+                except Exception: pass
+                del self._no_data_txt
+
             if xs:
-                self._ax.set_xlim(0, max(xs))
-                ymax = max(max(rps_v + pred_v[:len(xs)] + [1]), 10) * 1.15
+                self._ax.set_xlim(0, max(xs) if max(xs) > 0 else 1)
+                combined = rps_v + pred_v[:len(xs)]
+                ymax = max(max(combined + [0.001]), 0.1) * 1.25
                 self._ax.set_ylim(0, ymax)
-            # X tick labels
-            if ts:
+                # X tick etiketleri
                 step = max(1, len(ts) // 6)
                 self._ax.set_xticks(xs[::step])
                 self._ax.set_xticklabels([ts[i] for i in xs[::step]], fontsize=7)
+                # Kaynak etiketi
+                src_disp = {"flask": "flask_http_request_total",
+                            "filtered": "http_requests_total",
+                            "all": "http_requests_total (tümü)",
+                            "nginx": "nginx_http_requests_total"}.get(ts_src, ts_src)
+                self._range_lbl.setText(
+                    f"Son 6 dakika  •  5 sn aralık"
+                    + (f"  •  📡 {src_disp}" if ts_src and ts_src != "none" else "")
+                )
+            else:
+                # Veri yok — düzgün placeholder göster
+                self._ax.set_xlim(0, 1)
+                self._ax.set_ylim(0, 10)
+                self._ax.set_xticks([])
+                self._no_data_txt = self._ax.text(
+                    0.5, 0.5, "Prometheus verisi bekleniyor…",
+                    transform=self._ax.transAxes, ha="center", va="center",
+                    color="#5A6A8A", fontsize=11, style="italic"
+                )
+                self._range_lbl.setText("Son 6 dakika  •  5 sn aralık  •  ⏳ veri bekleniyor")
+
             # Fill under real RPS
             if self._fill:
-                try:
-                    self._fill.remove()
-                except Exception:
-                    pass
+                try: self._fill.remove()
+                except Exception: pass
                 self._fill = None
             if rps_v:
-                self._fill = self._ax.fill_between(xs, rps_v, alpha=0.10, color="#818CF8")
+                self._fill = self._ax.fill_between(xs, rps_v, alpha=0.12, color="#818CF8")
             self._canvas.draw_idle()
 
         # Services
@@ -8588,14 +8647,22 @@ class DashboardPanel(QWidget):
 
     # ── Technical Tab ──────────────────────────────────────────────────────
     def _build_technical_tab(self) -> QWidget:
-        w = QWidget()
-        w.setStyleSheet("background:transparent;")
-        lay = QVBoxLayout(w)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        inner = QWidget()
+        inner.setStyleSheet("background:transparent;")
+        lay = QVBoxLayout(inner)
         lay.setContentsMargins(12, 12, 12, 12)
         lay.setSpacing(10)
 
         # Refresh button row
         btn_row = QHBoxLayout()
+        self._tech_status_lbl = QLabel("Yükleniyor…")
+        self._tech_status_lbl.setStyleSheet(
+            f"color:{C_TEXT_DIM}; font-size:11px; background:transparent; border:none;"
+        )
+        btn_row.addWidget(self._tech_status_lbl)
         btn_row.addStretch()
         btn_ref = QPushButton("↻ Yenile")
         btn_ref.setFixedWidth(100)
@@ -8603,62 +8670,127 @@ class DashboardPanel(QWidget):
         btn_row.addWidget(btn_ref)
         lay.addLayout(btn_row)
 
-        def _section(title):
+        def _section(title, height=None):
             lbl = QLabel(title)
-            lbl.setStyleSheet(f"color:{C_ACCENT}; font-size:12px; font-weight:600; padding:4px 0 2px;")
+            lbl.setStyleSheet(
+                f"color:{C_ACCENT}; font-size:12px; font-weight:600; "
+                f"padding:6px 0 2px; background:transparent; border:none;"
+            )
             lay.addWidget(lbl)
             te = QTextEdit()
             te.setReadOnly(True)
             te.setStyleSheet(
-                f"background:{C_SURFACE}; color:{C_TEXT}; font-family:Consolas,monospace; "
-                f"font-size:11px; border:1px solid #28285A; border-radius:6px; padding:6px;"
+                f"QTextEdit {{ background:{C_SURFACE}; color:{C_TEXT}; "
+                f"font-family:Consolas,'Courier New',monospace; "
+                f"font-size:11px; border:1px solid #28285A; border-radius:6px; padding:6px; }}"
             )
             te.setLineWrapMode(QTextEdit.LineWrapMode.NoWrap)
+            if height:
+                te.setMaximumHeight(height)
             lay.addWidget(te)
             return te
 
-        self._tech_pods   = _section("Pod Durumu")
-        self._tech_pods.setMaximumHeight(150)
-        self._tech_keda   = _section("KEDA ScaledObject")
-        self._tech_keda.setMaximumHeight(90)
-        self._tech_events = _section("Son Kubernetes Olayları")
-        self._tech_events.setMaximumHeight(200)
-        self._tech_log    = _section("Aktivite Logu")
-        self._tech_log.setMaximumHeight(200)
+        self._tech_pods    = _section("🟢  Pod Durumu",                  height=160)
+        self._tech_svc     = _section("🌐  Servisler & Port",             height=120)
+        self._tech_hpa     = _section("⚖️  HPA / ScaledObject",          height=110)
+        self._tech_prom    = _section("📊  Prometheus Metrik Kaynağı",    height=80)
+        self._tech_events  = _section("📅  Son Kubernetes Olayları",      height=180)
+        self._tech_log     = _section("📋  Aktivite Logu (son 30)",       height=200)
 
-        self._refresh_technical()
+        scroll.setWidget(inner)
+        w = QWidget()
+        w.setStyleSheet("background:transparent;")
+        outer = QVBoxLayout(w)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.addWidget(scroll)
+
+        # İlk yükleme
+        QTimer.singleShot(500, self._refresh_technical)
+        # 30 sn'de bir otomatik yenile
+        self._tech_auto_timer = QTimer(self)
+        self._tech_auto_timer.timeout.connect(self._refresh_technical)
+        self._tech_auto_timer.start(30_000)
         return w
 
     def _refresh_technical(self):
+        import datetime as _dt
+        QTimer.singleShot(0, lambda: self._tech_status_lbl.setText(
+            f"Yenileniyor… ({_dt.datetime.now().strftime('%H:%M:%S')})"
+        ))
+
         def do():
+            import datetime as _dt, requests as _req
             instance = self.ops.get_instance()
             ns = instance.get("namespace", "autoscaleops") if instance else "autoscaleops"
 
-            # Pods
-            _, pods_out = run_ps(f"kubectl get pods -n {ns} -o wide --no-headers 2>&1", timeout=12)
-            # KEDA ScaledObject
-            _, keda_out = run_ps(f"kubectl get scaledobject -n {ns} --no-headers 2>&1", timeout=12)
-            # Events (last 15)
-            _, ev_out   = run_ps(
+            # ── Pods (geniş format) ───────────────────────────────────────
+            _, pods_out = run_ps(
+                f"kubectl get pods -n {ns} -o wide --no-headers 2>&1", timeout=12
+            )
+            pods_out = pods_out or "(pod bulunamadı)"
+
+            # ── Servisler ─────────────────────────────────────────────────
+            _, svc_out = run_ps(
+                f"kubectl get svc -n {ns} --no-headers 2>&1", timeout=10
+            )
+            svc_out = svc_out or "(servis bulunamadı)"
+
+            # ── HPA + ScaledObject ────────────────────────────────────────
+            _, hpa_out  = run_ps(
+                f"kubectl get hpa -n {ns} --no-headers 2>&1", timeout=10
+            )
+            _, keda_out = run_ps(
+                f"kubectl get scaledobject -n {ns} --no-headers 2>&1", timeout=10
+            )
+            hpa_combined = ""
+            if hpa_out and hpa_out.strip():
+                hpa_combined += "── HPA ──\n" + hpa_out.strip()
+            if keda_out and keda_out.strip():
+                hpa_combined += ("\n" if hpa_combined else "") + "── KEDA ScaledObject ──\n" + keda_out.strip()
+            hpa_combined = hpa_combined or "(HPA / ScaledObject yok)"
+
+            # ── Prometheus metrik kaynağı ─────────────────────────────────
+            prom_src = "bilinmiyor"
+            try:
+                for _src, _q in self._RPS_QUERIES:
+                    r = _req.get(self.PROM_URL, params={"query": _q}, timeout=2)
+                    res = r.json().get("data", {}).get("result", [])
+                    if res:
+                        v = float(res[0]["value"][1])
+                        prom_src = f"{_src}  →  {_q}\nAnlık değer: {v:.4f} RPS"
+                        break
+                else:
+                    prom_src = "Prometheus'a bağlanılamıyor (port 9090)"
+            except Exception as e:
+                prom_src = f"Prometheus hatası: {e}"
+
+            # ── Events (son 15) ───────────────────────────────────────────
+            _, ev_out = run_ps(
                 f"kubectl get events -n {ns} --sort-by=.lastTimestamp --no-headers 2>&1", timeout=12
             )
-            ev_lines = ev_out.strip().splitlines()[-15:]
-            ev_out   = "\n".join(ev_lines)
+            ev_lines = (ev_out or "").strip().splitlines()[-15:]
+            ev_out = "\n".join(ev_lines) or "(olay yok)"
 
-            # Activity log from DB
-            logs = self.db.get_activity_log(limit=40)
+            # ── Activity log from DB ──────────────────────────────────────
+            logs = self.db.get_activity_log(limit=30)
             log_lines = []
             for entry in reversed(logs):
-                ts   = entry.get("timestamp", "")[:19]
-                etype = entry.get("event_type", "")
-                desc  = entry.get("description", "")
-                log_lines.append(f"[{ts}] {etype:<14} {desc}")
+                ts_str = (entry.get("timestamp") or "")[:19]
+                etype  = (entry.get("event_type") or "")
+                desc   = (entry.get("description") or "")
+                log_lines.append(f"[{ts_str}] {etype:<16} {desc}")
             log_out = "\n".join(log_lines) if log_lines else "(henüz aktivite yok)"
 
-            QTimer.singleShot(0, lambda: self._tech_pods.setPlainText(pods_out or "(sonuç yok)"))
-            QTimer.singleShot(0, lambda: self._tech_keda.setPlainText(keda_out or "(sonuç yok)"))
-            QTimer.singleShot(0, lambda: self._tech_events.setPlainText(ev_out or "(sonuç yok)"))
+            now_str = _dt.datetime.now().strftime("%H:%M:%S")
+            QTimer.singleShot(0, lambda: self._tech_pods.setPlainText(pods_out))
+            QTimer.singleShot(0, lambda: self._tech_svc.setPlainText(svc_out))
+            QTimer.singleShot(0, lambda: self._tech_hpa.setPlainText(hpa_combined))
+            QTimer.singleShot(0, lambda: self._tech_prom.setPlainText(prom_src))
+            QTimer.singleShot(0, lambda: self._tech_events.setPlainText(ev_out))
             QTimer.singleShot(0, lambda: self._tech_log.setPlainText(log_out))
+            QTimer.singleShot(0, lambda: self._tech_status_lbl.setText(
+                f"Son güncelleme: {now_str}  •  ns: {ns}"
+            ))
 
         import threading
         threading.Thread(target=do, daemon=True).start()
