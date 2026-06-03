@@ -7414,19 +7414,14 @@ class DashboardPanel(QWidget):
         except Exception:
             data["ts_pred"] = []
 
-        # Pod count
-        try:
-            ns = (self.ops.get_instance() or {}).get("namespace", "autoscaleops")
-            name = self.db.get_setting("active_project_name", "autoscaleops-app")
-            ok, out = run_ps(
-                f"kubectl get pods -n {ns} -l app={name} "
-                f"--field-selector=status.phase=Running --no-headers 2>&1"
-            )
-            data["pods"] = len([l for l in out.strip().splitlines() if l.strip()]) if ok else 0
-        except Exception:
-            data["pods"] = 0
-
-        # Service liveness
+        # ── Grafik + kart güncellemesi: Prometheus verisi hazır → hemen uygula ──
+        # kubectl beklemeyi gerektirmez; pods/keda ayrı thread'de devam eder.
+        import datetime as _dt
+        data["ts_now"] = _dt.datetime.now().strftime("%H:%M:%S")
+        data.setdefault("pods", 0)
+        data.setdefault("keda_ok", False)
+        data.setdefault("keda_txt", "—")
+        # Servis canlılık (hızlı TCP)
         import socket
         for key, host, port in [
             ("prometheus", "127.0.0.1", 9090),
@@ -7439,20 +7434,38 @@ class DashboardPanel(QWidget):
                 data[f"svc_{key}"] = True
             except Exception:
                 data[f"svc_{key}"] = False
-
-        # KEDA
-        try:
-            ok, out = run_ps("kubectl get scaledobjects -A --no-headers 2>&1")
-            data["keda_ok"] = ok and bool(out.strip())
-            data["keda_txt"] = out.strip().split("\n")[0][:60] if ok and out.strip() else "—"
-        except Exception:
-            data["keda_ok"] = False
-            data["keda_txt"] = "—"
-
-        import datetime as _dt
-        data["ts_now"] = _dt.datetime.now().strftime("%H:%M:%S")
-        # Apply on main thread
+        # Grafiği hemen güncelle (kubectl beklemeden)
         QTimer.singleShot(0, lambda: self._apply(data))
+
+        # ── Arka planda: pod sayısı + KEDA (kubectl yavaş olabilir) ──────────
+        def _fetch_k8s():
+            try:
+                ns = (self.ops.get_instance() or {}).get("namespace", "autoscaleops")
+                name = self.db.get_setting("active_project_name", "autoscaleops-app")
+                ok, out = run_ps(
+                    f"kubectl get pods -n {ns} -l app={name} "
+                    f"--field-selector=status.phase=Running --no-headers 2>&1",
+                    timeout=8
+                )
+                pods = len([l for l in out.strip().splitlines() if l.strip()]) if ok else 0
+            except Exception:
+                pods = 0
+            try:
+                ok2, out2 = run_ps("kubectl get scaledobjects -A --no-headers 2>&1", timeout=8)
+                keda_ok  = ok2 and bool(out2.strip())
+                keda_txt = out2.strip().split("\n")[0][:60] if ok2 and out2.strip() else "—"
+            except Exception:
+                keda_ok  = False
+                keda_txt = "—"
+            k8s = dict(data)   # mevcut veriyi kopyala
+            k8s["pods"]     = pods
+            k8s["keda_ok"]  = keda_ok
+            k8s["keda_txt"] = keda_txt
+            k8s["ts_now"]   = _dt.datetime.now().strftime("%H:%M:%S")
+            QTimer.singleShot(0, lambda: self._apply(k8s))
+
+        import threading as _th
+        _th.Thread(target=_fetch_k8s, daemon=True).start()
 
     def _apply(self, data: dict):
         rps   = data.get("rps",  0.0)
@@ -8714,80 +8727,83 @@ class DashboardPanel(QWidget):
 
     def _refresh_technical(self):
         import datetime as _dt
+        _now_str = _dt.datetime.now().strftime("%H:%M:%S")
         QTimer.singleShot(0, lambda: self._tech_status_lbl.setText(
-            f"Yenileniyor… ({_dt.datetime.now().strftime('%H:%M:%S')})"
+            f"Yenileniyor… ({_now_str})"
         ))
 
         def do():
-            import datetime as _dt, requests as _req
+            import datetime as _dt, requests as _req, concurrent.futures as _cf
             instance = self.ops.get_instance()
             ns = instance.get("namespace", "autoscaleops") if instance else "autoscaleops"
 
-            # ── Pods (geniş format) ───────────────────────────────────────
-            _, pods_out = run_ps(
-                f"kubectl get pods -n {ns} -o wide --no-headers 2>&1", timeout=12
-            )
-            pods_out = pods_out or "(pod bulunamadı)"
-
-            # ── Servisler ─────────────────────────────────────────────────
-            _, svc_out = run_ps(
-                f"kubectl get svc -n {ns} --no-headers 2>&1", timeout=10
-            )
-            svc_out = svc_out or "(servis bulunamadı)"
-
-            # ── HPA + ScaledObject ────────────────────────────────────────
-            _, hpa_out  = run_ps(
-                f"kubectl get hpa -n {ns} --no-headers 2>&1", timeout=10
-            )
-            _, keda_out = run_ps(
-                f"kubectl get scaledobject -n {ns} --no-headers 2>&1", timeout=10
-            )
-            hpa_combined = ""
-            if hpa_out and hpa_out.strip():
-                hpa_combined += "── HPA ──\n" + hpa_out.strip()
-            if keda_out and keda_out.strip():
-                hpa_combined += ("\n" if hpa_combined else "") + "── KEDA ScaledObject ──\n" + keda_out.strip()
-            hpa_combined = hpa_combined or "(HPA / ScaledObject yok)"
-
-            # ── Prometheus metrik kaynağı ─────────────────────────────────
-            prom_src = "bilinmiyor"
+            # ── Prometheus (hızlı — bloğu bekleme) ───────────────────────
+            prom_src = "Prometheus'a bağlanılamıyor (port 9090)"
             try:
                 for _src, _q in self._RPS_QUERIES:
                     r = _req.get(self.PROM_URL, params={"query": _q}, timeout=2)
                     res = r.json().get("data", {}).get("result", [])
                     if res:
                         v = float(res[0]["value"][1])
-                        prom_src = f"{_src}  →  {_q}\nAnlık değer: {v:.4f} RPS"
+                        prom_src = f"✅ {_src}  →  {_q}\nAnlık değer: {v:.4f} RPS"
                         break
-                else:
-                    prom_src = "Prometheus'a bağlanılamıyor (port 9090)"
             except Exception as e:
-                prom_src = f"Prometheus hatası: {e}"
+                prom_src = f"Hata: {e}"
+            QTimer.singleShot(0, lambda: self._tech_prom.setPlainText(prom_src))
 
-            # ── Events (son 15) ───────────────────────────────────────────
-            _, ev_out = run_ps(
-                f"kubectl get events -n {ns} --sort-by=.lastTimestamp --no-headers 2>&1", timeout=12
-            )
-            ev_lines = (ev_out or "").strip().splitlines()[-15:]
-            ev_out = "\n".join(ev_lines) or "(olay yok)"
+            # ── Activity log (hızlı — DB) ─────────────────────────────────
+            try:
+                logs = self.db.get_activity_log(limit=30)
+                log_lines = []
+                for entry in reversed(logs):
+                    ts_str = (entry.get("timestamp") or "")[:19]
+                    etype  = (entry.get("event_type") or "")
+                    desc   = (entry.get("description") or "")
+                    log_lines.append(f"[{ts_str}] {etype:<16} {desc}")
+                log_out = "\n".join(log_lines) if log_lines else "(henüz aktivite yok)"
+            except Exception:
+                log_out = "(DB hatası)"
+            QTimer.singleShot(0, lambda: self._tech_log.setPlainText(log_out))
 
-            # ── Activity log from DB ──────────────────────────────────────
-            logs = self.db.get_activity_log(limit=30)
-            log_lines = []
-            for entry in reversed(logs):
-                ts_str = (entry.get("timestamp") or "")[:19]
-                etype  = (entry.get("event_type") or "")
-                desc   = (entry.get("description") or "")
-                log_lines.append(f"[{ts_str}] {etype:<16} {desc}")
-            log_out = "\n".join(log_lines) if log_lines else "(henüz aktivite yok)"
+            # ── kubectl komutları PARALEL ─────────────────────────────────
+            def _get_pods():
+                _, out = run_ps(f"kubectl get pods -n {ns} -o wide --no-headers 2>&1", timeout=8)
+                return out or "(pod bulunamadı)"
+
+            def _get_svc():
+                _, out = run_ps(f"kubectl get svc -n {ns} --no-headers 2>&1", timeout=8)
+                return out or "(servis bulunamadı)"
+
+            def _get_hpa():
+                _, hpa  = run_ps(f"kubectl get hpa -n {ns} --no-headers 2>&1", timeout=8)
+                _, keda = run_ps(f"kubectl get scaledobject -n {ns} --no-headers 2>&1", timeout=8)
+                parts = []
+                if hpa  and hpa.strip():  parts.append("── HPA ──\n" + hpa.strip())
+                if keda and keda.strip(): parts.append("── KEDA ScaledObject ──\n" + keda.strip())
+                return "\n".join(parts) if parts else "(HPA / ScaledObject yok)"
+
+            def _get_events():
+                _, out = run_ps(
+                    f"kubectl get events -n {ns} --sort-by=.lastTimestamp --no-headers 2>&1", timeout=8
+                )
+                lines = (out or "").strip().splitlines()[-15:]
+                return "\n".join(lines) or "(olay yok)"
+
+            with _cf.ThreadPoolExecutor(max_workers=3) as ex:
+                f_pods   = ex.submit(_get_pods)
+                f_svc    = ex.submit(_get_svc)
+                f_hpa    = ex.submit(_get_hpa)
+                f_events = ex.submit(_get_events)
+                pods_out    = f_pods.result()
+                svc_out     = f_svc.result()
+                hpa_combined = f_hpa.result()
+                ev_out      = f_events.result()
 
             now_str = _dt.datetime.now().strftime("%H:%M:%S")
             QTimer.singleShot(0, lambda: self._tech_pods.setPlainText(pods_out))
             QTimer.singleShot(0, lambda: self._tech_svc.setPlainText(svc_out))
             QTimer.singleShot(0, lambda: self._tech_hpa.setPlainText(hpa_combined))
-            QTimer.singleShot(0, lambda: self._tech_prom.setPlainText(prom_src))
             QTimer.singleShot(0, lambda: self._tech_events.setPlainText(ev_out))
-            QTimer.singleShot(0, lambda: self._tech_log.setPlainText(log_out))
             QTimer.singleShot(0, lambda: self._tech_status_lbl.setText(
                 f"Son güncelleme: {now_str}  •  ns: {ns}"
             ))
