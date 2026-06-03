@@ -3145,65 +3145,100 @@ class LaunchWorker(QThread):
 
         # 3 — Port-forward & Dashboard
         self.step_update.emit("dashboard", "running")
+        instance = self.ops.ensure_instance()
+        namespace = instance.get("namespace", "autoscaleops")
+
+        # ── 3a. DB ↔ K8s gerçeği doğrulaması (open-source için kritik) ──────
+        # DB'deki active_project_service K8s'te var mı? Yoksa otomatik düzelt.
+        active_svc  = self.ops.db.get_setting("active_project_service", "")
+        active_port = int(self.ops.db.get_setting("active_project_port", "8080"))
+        active_name = self.ops.db.get_setting("active_project_name", "")
+
+        _, svc_list_out = run_ps(
+            f"kubectl get svc -n {namespace} --no-headers "
+            f"-o custom-columns=NAME:.metadata.name 2>&1",
+            timeout=10
+        )
+        k8s_svcs = [s.strip() for s in svc_list_out.splitlines() if s.strip()]
+
+        if active_svc and k8s_svcs and active_svc not in k8s_svcs:
+            # DB'deki servis K8s'te yok — gerçek servisi bul ve DB'yi düzelt
+            app_svcs = [s for s in k8s_svcs
+                        if s.endswith("-service") and not s.startswith("kubernetes")]
+            if app_svcs:
+                fixed_svc  = app_svcs[-1]                    # en son deploy edilen
+                fixed_name = fixed_svc.replace("-service", "")
+                self.ops.db.set_setting("active_project_service", fixed_svc)
+                self.ops.db.set_setting("active_project_name",    fixed_name)
+                _write_active_project_json(fixed_name, active_port, fixed_svc)
+                active_svc  = fixed_svc
+                active_name = fixed_name
+
+        # ── 3b. Port-forward başlat ──────────────────────────────────────────
         try:
-            instance = self.ops.ensure_instance()
-            namespace = instance.get("namespace", "autoscaleops")
-            self.ops.stop_port_forwards()       # önce eskiyi temizle
+            self.ops.stop_port_forwards()
+            time.sleep(1)
             self.ops.start_port_forwards(namespace)
         except Exception:
             pass
 
-        # Port-forward'ın ayağa kalkması için bekle + doğrula (maks 10 dakika)
-        # ML/AI uygulamaları (HuggingFace vb.) model indirme nedeniyle uzun sürebilir.
-        # start_port_forwards() port'u değiştirmiş olabilir → DB'den tekrar oku
+        # ── 3c. Bekleme döngüsü — aktif yeniden deneme ile (maks 2 dk) ───────
+        # Her 5s TCP kontrol; her 30s HTTP kontrol + port-forward yeniden başlat
+        # TCP yerine HTTP kullan → kırık ama "canlı" processlerden etkilenmez
         active_port = int(self.ops.db.get_setting("active_project_port", "8080"))
-        active_svc  = self.ops.db.get_setting("active_project_service", "")
-        pf_ok  = False
-        _MAX   = 600   # 10 dakika
-        _STEP  = 5     # 5 saniyede bir kontrol
+        pf_ok   = False
+        _MAX    = 120    # 2 dakika (eski: 10 dk)
+        _STEP   = 5
         _waited = 0
+
         while _waited < _MAX:
             time.sleep(_STEP)
             _waited += _STEP
-            if self.ops._is_port_open(active_port):
+
+            # HTTP seviyesinde doğrula
+            if self.ops.check_app():
                 pf_ok = True
                 break
-            # Her 30 saniyede bir kullanıcıya mesaj göster
+
             if _waited % 30 == 0:
+                # 30 saniyede bir: port-forward'ı yeniden başlat (pasif bekleme yok)
+                try:
+                    self.ops.stop_port_forwards()
+                    time.sleep(1)
+                    self.ops.start_port_forwards(namespace)
+                    active_port = int(self.ops.db.get_setting("active_project_port", "8080"))
+                except Exception:
+                    pass
                 self.error_signal.emit(
                     "dashboard",
-                    f"Uygulama Başlaması Bekleniyor ({_waited}s / {_MAX}s)",
-                    "Ağır uygulama (ML model, büyük bağımlılık) başlatılıyor olabilir. "
-                    "Lütfen bekleyin — maksimum 10 dakika."
+                    f"Uygulama Bağlantısı Kuruluyor… ({_waited}s / {_MAX}s)",
+                    f"Servis: {active_svc}  |  Port: {active_port}\n"
+                    "Port-forward yeniden deneniyor. Pod çalışıyorsa birkaç saniye içinde bağlanır."
                 )
 
         if not pf_ok:
-            # Port-forward başarısız → kubectl ile servis gerçekten var mı diye bak
-            _, svc_out = run_ps(
-                f"kubectl get svc {active_svc} -n {namespace} 2>&1"
-                if active_svc else
-                f"kubectl get svc -n {namespace} 2>&1",
-                timeout=10
+            # Servis K8s'te gerçekten var mı?
+            _, svc_check = run_ps(
+                f"kubectl get svc -n {namespace} --no-headers 2>&1", timeout=8
             )
-            if not active_svc or "NotFound" in svc_out or "not found" in svc_out.lower():
-                # Proje yok — uyarı ver ama dashboard'u yine de başlat (kullanıcı deploy yapabilir)
+            has_svc = active_svc and active_svc in svc_check
+
+            if not has_svc:
                 self.error_signal.emit(
                     "dashboard",
-                    "Henüz Deploy Edilmiş Proje Yok",
+                    "Henüz Deploy Edilmiş Uygulama Yok",
                     "Dashboard açılıyor. Deploy sekmesinden projenizi deploy ettiğinizde "
-                    "trafik otomatik görünür."
+                    "uygulama otomatik olarak buraya bağlanır."
                 )
-                self.step_update.emit("dashboard", "warning")
-                # Dashboard'u başlatmaya devam et
             else:
-                # Servis var ama pod hazır değil — uyarı ver, devam et
                 self.error_signal.emit(
                     "dashboard",
-                    f"Uygulama Port {active_port} Henüz Hazır Değil",
-                    "Pod'lar başlatılıyor olabilir. Dashboard açılacak; "
-                    "uygulama hazır olunca bağlantı otomatik kurulur."
+                    f"Uygulama Port {active_port} Yanıt Vermiyor",
+                    f"Servis '{active_svc}' K8s'te mevcut ama HTTP yanıtı alınamıyor.\n"
+                    "Pod log'larını kontrol edin: kubectl logs -n autoscaleops -l app="
+                    f"{active_name} --tail=20"
                 )
-                self.step_update.emit("dashboard", "warning")
+            self.step_update.emit("dashboard", "warning")
 
         ok, msg = self.ops.start_dashboard()
         if not ok:
@@ -5411,24 +5446,26 @@ class HomePanel(QWidget):
         self._launch_worker.start()
 
     def _check_port_forward(self):
-        """Port-forward watchdog: ölmüşse sessizce yeniden başlat."""
+        """Port-forward watchdog: HTTP seviyesinde kontrol; kırıksa yeniden başlat."""
         port = int(self.ops.db.get_setting("active_project_port", "8080"))
-        if self.ops._is_port_open(port):
+        # TCP değil, gerçek HTTP kontrolü (TCP open ama HTTP broken → kırık process)
+        app_ok = self.ops.check_app()
+        if app_ok:
             return
-        # Port kapalı — arka planda yeniden başlat
+        # HTTP başarısız → eski process'leri temizle ve yeniden başlat
         def _restart():
             try:
                 instance = self.ops.ensure_instance()
                 ns = instance.get("namespace", "autoscaleops")
+                self.ops.stop_port_forwards()       # kırık olanları zorla kapat
+                import time as _t; _t.sleep(1)
                 self.ops.start_port_forwards(ns)
             except Exception:
                 pass
         threading.Thread(target=_restart, daemon=True).start()
-        # Kullanıcıya kısa bilgi ver
         self._error_card.show_error(
             "Port-Forward Yeniden Başlatıldı",
-            f"localhost:{port} kapandı — bağlantı otomatik yeniden kuruldu. "
-            "Birkaç saniye içinde ngrok tüneli de düzelecek.",
+            f"localhost:{port} yanıt vermiyordu — bağlantı otomatik yeniden kuruldu.",
             warning=True
         )
         # 10 sn sonra temizle
