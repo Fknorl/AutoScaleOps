@@ -1188,40 +1188,70 @@ def main():
         auto_r = st.checkbox("Auto-refresh 3s", value=st.session_state.auto_refresh, key="auto_r_chk")
         st.session_state.auto_refresh = auto_r
 
-    # ── Timeseries: _get_app_rps() ile aynı kaynağı kullan (tutarlılık için)
-    if _metrics_source == "flask_http_request_total":
-        _rps_ts_query = "sum(rate(flask_http_request_total[1m]))"
-    elif _metrics_source == "nginx_requests_total":
-        _rps_ts_query = "sum(rate(nginx_requests_total[1m]))"
-    elif _metrics_source in ("http_requests_total (all)", "none"):
-        _rps_ts_query = "sum(rate(http_requests_total[1m]))"
-    else:  # "http_requests_total" — filtered (kube/apiserver hariç)
-        _rps_ts_query = (
-            'sum(rate(http_requests_total{job!~"kubernetes-apiservers|apiserver|kube-apiserver"'
-            ',service!~".*kube.*|.*prometheus.*|.*coredns.*"}[1m]))'
-        )
-    ts_real = fetch_timeseries(_rps_ts_query, 30, "30s")
+    # ── Timeseries: cache'e bağımlı kalmadan tüm kaynakları dene ─────────────
+    def _fetch_rps_ts_robust(minutes: int = 30, step: str = "30s"):
+        """Tüm RPS metrik kaynaklarını sırayla dener; ilk veri döndüreni kullanır.
+        @st.cache_data kullanmıyor — eski 'boş' cache'in sorun çıkarmaması için."""
+        _end   = int(time.time())
+        _start = _end - minutes * 60
+        _candidates = [
+            # Önce bilinen aktif kaynak
+            ("flask_http_request_total",
+             "sum(rate(flask_http_request_total[1m]))"),
+            ("http_requests_total (filtered)",
+             'sum(rate(http_requests_total{job!~"kubernetes-apiservers|apiserver|kube-apiserver"'
+             ',service!~".*kube.*|.*prometheus.*|.*coredns.*"}[1m]))'),
+            ("http_requests_total (all)",
+             "sum(rate(http_requests_total[1m]))"),
+            ("nginx_requests_total",
+             "sum(rate(nginx_requests_total[1m]))"),
+        ]
+        for _src_name, _q in _candidates:
+            try:
+                _r = requests.get(
+                    f"{URLS['prometheus']}/api/v1/query_range",
+                    params={"query": _q, "start": _start, "end": _end, "step": step},
+                    timeout=CONNECTION_TIMEOUT,
+                )
+                if _r.ok:
+                    _d = _r.json()
+                    _result = _d.get("data", {}).get("result", [])
+                    if _result:
+                        _vals = [(float(_ts), float(_v))
+                                 for _ts, _v in _result[0]["values"]]
+                        if _vals:
+                            return _vals, _src_name
+            except Exception:
+                continue
+        return [], "none"
+
+    ts_real, _ts_source = _fetch_rps_ts_robust(30, "30s")
     ts_pred = fetch_timeseries("predicted_rps_30min", 30, "30s")
 
     chart_df = pd.DataFrame()
     if ts_real:
-        df_r = pd.DataFrame(ts_real, columns=["ts","Real RPS"])
+        df_r = pd.DataFrame(ts_real, columns=["ts", "Real RPS"])
         df_r["time"] = pd.to_datetime(df_r["ts"], unit="s")
-        chart_df = df_r[["time","Real RPS"]]
+        chart_df = df_r[["time", "Real RPS"]]
     if ts_pred:
-        df_p = pd.DataFrame(ts_pred, columns=["ts","AI Prediction"])
+        df_p = pd.DataFrame(ts_pred, columns=["ts", "AI Prediction"])
         df_p["time"] = pd.to_datetime(df_p["ts"], unit="s")
         if not chart_df.empty:
-            chart_df = chart_df.merge(df_p[["time","AI Prediction"]], on="time", how="outer").sort_values("time").fillna(0)
+            chart_df = chart_df.merge(
+                df_p[["time", "AI Prediction"]], on="time", how="outer"
+            ).sort_values("time").fillna(0)
         else:
-            chart_df = df_p[["time","AI Prediction"]]
+            chart_df = df_p[["time", "AI Prediction"]]
 
+    # Prometheus boş döndürdüyse tarihsel veriye bak
     if chart_df.empty:
         hist1d = get_history(1)
         if hist1d:
             df_h = pd.DataFrame(hist1d)
             df_h["time"] = pd.to_datetime(df_h["timestamp"])
-            chart_df = df_h.rename(columns={"real_rps":"Real RPS","pred_rps":"AI Prediction"})[["time","Real RPS","AI Prediction"]]
+            chart_df = df_h.rename(
+                columns={"real_rps": "Real RPS", "pred_rps": "AI Prediction"}
+            )[["time", "Real RPS", "AI Prediction"]]
 
     if not chart_df.empty:
         chart_df = chart_df.set_index("time").replace([float('inf'),float('-inf')], 0).fillna(0)
@@ -1242,18 +1272,23 @@ def main():
         _fig.update_layout(
             paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
             font=dict(color="#e2e8f0"),
-            margin=dict(l=0, r=0, t=10, b=0), height=300,
+            margin=dict(l=0, r=0, t=20, b=0), height=320,
             showlegend=True,
             legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0),
-            xaxis=dict(showgrid=False, zeroline=False),
-            yaxis=dict(showgrid=True, gridcolor="rgba(255,255,255,0.05)", zeroline=False),
+            xaxis=dict(showgrid=False, zeroline=False, color="#94a3b8"),
+            yaxis=dict(showgrid=True, gridcolor="rgba(255,255,255,0.07)",
+                       zeroline=False, color="#94a3b8"),
             hovermode="x unified"
         )
         st.plotly_chart(_fig, use_container_width=True, config={"displayModeBar": False})
-        s1, s2, s3 = st.columns(3)
+        s1, s2, s3, s4 = st.columns(4)
         s1.metric("Data Points", len(chart_df))
-        if "Real RPS" in chart_df.columns: s2.metric("Avg Real RPS", f"{chart_df['Real RPS'].mean():.2f}")
-        if "AI Prediction" in chart_df.columns: s3.metric("Avg AI Pred", f"{chart_df['AI Prediction'].mean():.2f}")
+        if "Real RPS" in chart_df.columns: s2.metric("Avg Real RPS", f"{chart_df['Real RPS'].mean():.3f}")
+        if "AI Prediction" in chart_df.columns: s3.metric("Avg AI Pred", f"{chart_df['AI Prediction'].mean():.3f}")
+        s4.markdown(
+            f'<div style="font-size:10px;color:#64748b;padding-top:8px;">📡 Kaynak: {_ts_source}</div>',
+            unsafe_allow_html=True
+        )
 
         if real_rps == 0 and not ts_real:
             st.markdown(f"""<div class="alert alert-warn">
