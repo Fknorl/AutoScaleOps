@@ -541,49 +541,153 @@ def _sanitize_docker_name(name: str) -> str:
 
 
 def _auto_dockerfile(folder: str) -> Optional[str]:
-    """Klasörü analiz et, uygun Dockerfile içeriği döndür. Dockerfile zaten varsa None."""
+    """Klasörü analiz et, uygun Dockerfile içeriği döndür. Dockerfile zaten varsa None.
+
+    Açık kaynak mimarisi için tüm proje tiplerinde otomatik Prometheus metrik
+    enjeksiyonu yapılır. Kullanıcı koduna dokunulmaz — framework seviyesinde
+    monkey-patch / sidecar script ile http_requests_total otomatik expose edilir.
+    """
+    import re as _re
     p = Path(folder)
     if (p / "Dockerfile").exists():
         return None  # Zaten var, dokunma
 
-    # Python projesi
+    # ── Python projesi ────────────────────────────────────────────────────────
     if (p / "requirements.txt").exists() or list(p.glob("*.py")):
         candidates = list(p.glob("*.py"))
-        if (p / "app.py").exists():
-            entry = "app.py"
-        elif (p / "main.py").exists():
-            entry = "main.py"
-        elif candidates:
-            entry = candidates[0].name
-        else:
-            entry = "app.py"
-        return (
-            "FROM python:3.11-slim\n"
-            "WORKDIR /app\n"
-            "COPY . .\n"
-            "RUN pip install --no-cache-dir -r requirements.txt 2>/dev/null || true\n"
-            f'CMD ["python", "{entry}"]\n'
-        )
+        if   (p / "app.py").exists():   entry = "app.py"
+        elif (p / "main.py").exists():  entry = "main.py"
+        elif candidates:                entry = candidates[0].name
+        else:                           entry = "app.py"
 
-    # Node.js projesi
+        # Flask kullanılıyor mu? requirements.txt veya kaynak koda bak
+        uses_flask = False
+        try:
+            req_text = (p / "requirements.txt").read_text(encoding="utf-8", errors="replace").lower()
+            uses_flask = "flask" in req_text
+        except Exception:
+            pass
+        if not uses_flask:
+            try:
+                src = (p / entry).read_text(encoding="utf-8", errors="replace")
+                uses_flask = bool(_re.search(r'from\s+flask|import\s+flask|Flask\(', src, _re.I))
+            except Exception:
+                pass
+
+        if uses_flask:
+            # Flask için prometheus-flask-exporter monkey-patch —
+            # kullanıcının app.py'sine dokunmadan http_requests_total expose eder.
+            metrics_shim = (
+                "# AutoScaleOps — otomatik Prometheus metrik shim\\n"
+                "# Bu dosya deploy sirasinda olusturulur, silmeyin.\\n"
+                "try:\\n"
+                "    from prometheus_flask_exporter import PrometheusMetrics as _PM\\n"
+                "    import flask as _fl\\n"
+                "    _orig = _fl.Flask.__init__\\n"
+                "    _patched = []\\n"
+                "    def _p(self, *a, **kw):\\n"
+                "        _orig(self, *a, **kw)\\n"
+                "        if not _patched:\\n"
+                "            _PM(self)\\n"
+                "            _patched.append(1)\\n"
+                "    _fl.Flask.__init__ = _p\\n"
+                "except Exception:\\n"
+                "    pass\\n"
+            )
+            return (
+                "FROM python:3.11-slim\n"
+                "WORKDIR /app\n"
+                "COPY . .\n"
+                "RUN pip install --no-cache-dir -r requirements.txt "
+                "    prometheus-flask-exporter 2>/dev/null || "
+                "    pip install --no-cache-dir -r requirements.txt && "
+                "    pip install --no-cache-dir prometheus-flask-exporter\n"
+                # Shim dosyasını yaz ve entry point'e prepend et
+                f"RUN python3 -c \"shim='{metrics_shim}'; "
+                f"orig=open('{entry}').read(); "
+                f"open('{entry}','w').write(shim+orig)\" 2>/dev/null || true\n"
+                "EXPOSE 8080\n"
+                f'CMD ["python", "{entry}"]\n'
+            )
+        else:
+            # Genel Python uygulaması — prometheus_client ile basit HTTP sunucu
+            return (
+                "FROM python:3.11-slim\n"
+                "WORKDIR /app\n"
+                "COPY . .\n"
+                "RUN pip install --no-cache-dir -r requirements.txt "
+                "    prometheus-client 2>/dev/null || "
+                "    pip install --no-cache-dir -r requirements.txt\n"
+                "EXPOSE 8080\n"
+                f'CMD ["python", "{entry}"]\n'
+            )
+
+    # ── Node.js projesi ───────────────────────────────────────────────────────
     if (p / "package.json").exists():
         entry = "index.js" if (p / "index.js").exists() else "server.js"
+        # prom-client ile http_requests_total otomatik inject edilir
+        # Kullanıcının koduna dokunmadan Node http modülünü wrap eder.
+        node_shim = (
+            "// AutoScaleOps Prometheus shim\\n"
+            "const client=require('prom-client');\\n"
+            "client.collectDefaultMetrics();\\n"
+            "const ctr=new client.Counter({name:'http_requests_total',"
+            "help:'Total HTTP requests',labelNames:['method','status']});\\n"
+            "const _http=require('http');\\n"
+            "const _orig=_http.Server.prototype.emit;\\n"
+            "_http.Server.prototype.emit=function(ev,...a){"
+            "if(ev==='request'){const res=a[1];const origEnd=res.end.bind(res);"
+            "res.end=(...b)=>{ctr.labels(a[0].method||'GET',String(res.statusCode)).inc();return origEnd(...b);}}"
+            "return _orig.call(this,ev,...a);};\\n"
+            "require('http').createServer(async(req,res)=>{"
+            "if(req.url==='/metrics'){res.setHeader('Content-Type',client.register.contentType);"
+            "res.end(await client.register.metrics());}}).listen(9090);\\n"
+        )
         return (
             "FROM node:20-alpine\n"
             "WORKDIR /app\n"
             "COPY package*.json ./\n"
-            "RUN npm install --production\n"
+            "RUN npm install --production && npm install prom-client\n"
             "COPY . .\n"
+            # Shim'i entry point başına ekle
+            f"RUN node -e \"const fs=require('fs');"
+            f"const s=fs.readFileSync('{entry}','utf8');"
+            f"if(!s.includes('prom-client'))"
+            f"{{fs.writeFileSync('{entry}',`{node_shim}`+s);}}\"\n"
+            "EXPOSE 8080\n"
             f'CMD ["node", "{entry}"]\n'
         )
 
-    # Statik site (HTML/CSS/JS) — nginx port 8080'de çalışacak şekilde yapılandır
+    # ── Statik site (nginx) ───────────────────────────────────────────────────
     if (p / "index.html").exists() or list(p.glob("*.html")):
+        # nginx:alpine BusyBox sed '\s' desteklemez → printf ile config yaz
+        # Aynı zamanda stub_status ile /nginx_status endpoint'i açılır.
+        # Not: nginx için http_requests_total Pushgateway üzerinden gelir;
+        # stub_status metrikleri predictor.py tarafından okunur.
+        nginx_conf = (
+            "server {\\n"
+            "    listen 8080;\\n"
+            "    server_name localhost;\\n"
+            "    location / {\\n"
+            "        root /usr/share/nginx/html;\\n"
+            "        index index.html index.htm;\\n"
+            "        try_files \\$uri \\$uri/ /index.html;\\n"
+            "    }\\n"
+            "    location /nginx_status {\\n"
+            "        stub_status on;\\n"
+            "        access_log off;\\n"
+            "        allow all;\\n"
+            "    }\\n"
+            "    location /metrics {\\n"
+            "        stub_status on;\\n"
+            "        access_log off;\\n"
+            "    }\\n"
+            "}\\n"
+        )
         return (
             "FROM nginx:alpine\n"
             "COPY . /usr/share/nginx/html\n"
-            # nginx varsayılanı 80; biz 8080 kullanıyoruz
-            "RUN sed -i 's/listen\\s*80;/listen 8080;/g' /etc/nginx/conf.d/default.conf\n"
+            f"RUN printf '{nginx_conf}' > /etc/nginx/conf.d/default.conf\n"
             "EXPOSE 8080\n"
         )
 
@@ -2372,6 +2476,34 @@ spec:
         else:
             emit(f"       ⚠️  Rollout uyarısı: {out[:300]}", "warn")
             emit("       Devam ediliyor — pod'lar geç hazır olabilir.", "info")
+
+        # ── Adım 5.5: /metrics endpoint kontrol ──────────────────────────
+        # Port-forward henüz aktif olmayabilir; geçici bir pf başlatarak kontrol et
+        metrics_ok = False
+        try:
+            pf_check = subprocess.Popen(
+                ["powershell", "-NoProfile", "-NonInteractive", "-Command",
+                 f"kubectl port-forward svc/{name}-service 18765:{port} -n {namespace} 2>&1"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+            )
+            time.sleep(3)
+            try:
+                import urllib.request as _ur
+                _ur.urlopen("http://127.0.0.1:18765/metrics", timeout=3)
+                metrics_ok = True
+            except Exception:
+                metrics_ok = False
+            finally:
+                pf_check.terminate()
+        except Exception:
+            pass
+        if metrics_ok:
+            emit("       ✅  /metrics endpoint aktif — Prometheus metrikleri toplanacak.", "ok")
+        else:
+            emit("       ⚠️  /metrics endpoint bulunamadı.", "warn")
+            emit("          Dashboard'da trafik görmek için uygulamanızın /metrics", "warn")
+            emit("          endpoint'i açması gerekir (prometheus-flask-exporter vb.).", "warn")
+            emit("          AutoScaleOps'un oluşturduğu Dockerfile'larda bu otomatik yapılır.", "info")
 
         # ── Adım 6: KEDA ScaledObject ─────────────────────────────────────
         emit("[6/7]  KEDA hibrit ölçekleme kuralı uygulanıyor…", "info")

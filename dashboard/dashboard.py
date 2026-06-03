@@ -1094,11 +1094,33 @@ def main():
         st.markdown(f'<div class="upcoming-strip">{chips}</div>', unsafe_allow_html=True)
 
     # ── METRICS ──────────────────────────────────────────────────────────────
-    real_rps = fetch_metric("sum(rate(http_requests_total[1m]))")
+    # Farklı framework'ler farklı metrik adları kullanır.
+    # Sırayla dene: http_requests_total → flask_http_request_total → nginx
+    def _get_app_rps() -> tuple:
+        """(rps, metric_name) döndürür. Birden fazla kaynağı dener."""
+        # 1. Standart: http_requests_total (kube/apiserver hariç)
+        v = fetch_metric(
+            'sum(rate(http_requests_total{job!~"kubernetes-apiservers|apiserver|kube-apiserver"'
+            ',service!~".*kube.*|.*prometheus.*|.*coredns.*"}[1m]))'
+        )
+        if v > 0: return v, "http_requests_total"
+        # 2. prometheus-flask-exporter varsayılan adı
+        v = fetch_metric("sum(rate(flask_http_request_total[1m]))")
+        if v > 0: return v, "flask_http_request_total"
+        # 3. Geniş sorgu — her http_requests_total (apiserver dahil ama düşük etki)
+        v = fetch_metric("sum(rate(http_requests_total[1m]))")
+        if v > 0: return v, "http_requests_total (all)"
+        # 4. nginx stub_status
+        v = fetch_metric("sum(rate(nginx_requests_total[1m]))")
+        if v > 0: return v, "nginx_requests_total"
+        return 0.0, "none"
+
+    real_rps, _metrics_source = _get_app_rps()
     pred_rps = fetch_metric("predicted_rps_30min")
     if pred_rps <= 0: pred_rps = calc_prediction(real_rps)
     real_rps = max(real_rps, 0.0)
     pred_rps = max(pred_rps, 0.0)
+    _has_metrics = _metrics_source != "none"
     pods      = get_pod_count()
     cost_h    = pods * COST_PER_POD_HOUR
     is_keda, keda_lbl = get_keda_status()
@@ -1206,15 +1228,27 @@ def main():
         if "AI Prediction" in chart_df.columns: s3.metric("Avg AI Pred", f"{chart_df['AI Prediction'].mean():.2f}")
 
         if real_rps == 0 and not ts_real:
-            st.markdown("""<div class="alert alert-warn">
-            <strong>Traffic is 0.</strong> Possible causes:<br>
-            1. The app metric name differs. Check Settings > Debug Metrics to see available metrics.<br>
-            2. Port-forward for app (8080) is not running. Run <code>.\\scripts\\start.ps1</code><br>
-            3. No requests have been made yet. Use the k6 Load Test tab to generate traffic.
+            st.markdown(f"""<div class="alert alert-warn">
+            <b>⚠️  Trafik Verisi Yok (RPS = 0)</b><br><br>
+            <b>Olası nedenler ve çözümler:</b><br>
+            1. <b>Uygulama /metrics endpoint'i yok</b> — AutoScaleOps'un oluşturduğu
+               Dockerfile kullanıyorsanız Flask için <code>prometheus-flask-exporter</code>
+               otomatik eklenir. Kendi Dockerfile'ınız varsa uygulamanıza metrics ekleyin.<br>
+            2. <b>Uygulama henüz istek almadı</b> — <b>Load Test</b> sekmesinden
+               k6 ile test trafiği gönderin.<br>
+            3. <b>ServiceMonitor eksik</b> — AutoScaleOps Deploy sekmesinden
+               projeyi yeniden deploy edin, ServiceMonitor otomatik oluşturulur.<br>
+            4. <b>Port-forward kesilmiş</b> — Ana sayfadan <b>Başlat</b>'a basın.
             </div>""", unsafe_allow_html=True)
     else:
-        st.markdown("""<div class="alert alert-info">
-        No data yet. Start a k6 load test or wait for traffic to accumulate.
+        st.markdown("""
+        <div class="alert alert-info" style="text-align:center; padding: 32px 20px;">
+            <div style="font-size:2rem; margin-bottom:12px;">📡</div>
+            <b>Trafik verisi bekleniyor…</b><br><br>
+            Uygulama henüz istek almadı veya /metrics endpoint'i açık değil.<br><br>
+            <b>Hızlı test:</b> <code>Load Test</code> sekmesinden k6 ile trafik gönderin.<br>
+            <b>Kalıcı çözüm:</b> Deploy sekmesinden projeyi tekrar deploy edin
+            (AutoScaleOps Dockerfile'ı otomatik metrics ekler).
         </div>""", unsafe_allow_html=True)
 
     if auto_r: time.sleep(3); st.rerun()

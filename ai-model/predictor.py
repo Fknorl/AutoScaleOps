@@ -33,10 +33,35 @@ DOMAIN_PROFILE_PATH = os.getenv(
 )
 
 # ── Generic metric desteği ────────────────────────────────────────────────────
-# Kullanıcı kendi Prometheus metriğini autoscaleops.yaml'da tanımlar.
-# Örnek: http_requests_total, nginx_http_requests_total, myapp_requests_count
-SOURCE_METRIC      = os.getenv("SOURCE_METRIC",      "http_requests_total")
+# Kullanıcı SOURCE_METRIC env ile kendi metriğini tanımlayabilir.
+# Tanımlanmamışsa auto-discovery: Prometheus'ta hangi metrik varsa onu kullan.
 PREDICTION_METRIC  = os.getenv("PREDICTION_METRIC",  "predicted_rps_30min")
+
+def _discover_source_metric() -> str:
+    """Hangi HTTP metriğinin mevcut olduğunu Prometheus'tan otomatik belirler."""
+    candidates = [
+        # Önce uygulama metrikleri (kube/system hariç filtre)
+        ('http_requests_total{job!~"kubernetes-apiservers|kube-apiserver"}', "http_requests_total"),
+        ('flask_http_request_total',  "flask_http_request_total"),
+        ('http_requests_total',        "http_requests_total"),
+        ('nginx_requests_total',       "nginx_requests_total"),
+    ]
+    try:
+        for query, name in candidates:
+            r = requests.get(
+                f"{PROMETHEUS_URL}/api/v1/query",
+                params={"query": f"sum(rate({query}[1m]))"}, timeout=5
+            )
+            if r.ok:
+                d = r.json()
+                if d.get("data", {}).get("result"):
+                    return name
+    except Exception:
+        pass
+    # Hiç bulunamazsa varsayılan; uygulama henüz trafik almamış olabilir
+    return os.getenv("SOURCE_METRIC", "http_requests_total")
+
+SOURCE_METRIC = os.getenv("SOURCE_METRIC", "") or _discover_source_metric()
 
 # ── Prometheus Metrics ───────────────────────────────────────────────────────
 registry    = CollectorRegistry()
