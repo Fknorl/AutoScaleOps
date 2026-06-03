@@ -590,8 +590,10 @@ conn_mgr = ConnectionManager()
 # ═══════════════════════════════════════════════════════════════════════════
 def run_ps(cmd: str, timeout=15) -> str:
     try:
-        r = subprocess.run(["powershell", "-Command", cmd],
-                           capture_output=True, text=True, encoding="utf-8", timeout=timeout)
+        r = subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command", cmd],
+            capture_output=True, text=True, encoding="utf-8", timeout=timeout
+        )
         return r.stdout.strip()
     except Exception as e:
         logger.error(f"PS error: {e}")
@@ -1597,34 +1599,106 @@ def main():
             with st.expander("Raw Data Table"):
                 st.dataframe(df, use_container_width=True)
         else:
-            st.markdown('<div class="alert alert-warn">No history yet. System will accumulate data over time.</div>',
-                        unsafe_allow_html=True)
+            # Seçilen aralıkta veri yok — tüm zamanı dene
+            hist_all = get_history(3650)
+            if hist_all:
+                st.info(
+                    f"Seçilen aralıkta ({days_s} gün) veri yok. "
+                    f"Toplam {len(hist_all)} geçmiş kayıt mevcut (en eski: {hist_all[-1]['timestamp'][:10]}).  \n"
+                    f"Dashboard çalıştıkça yeni veriler birikir — 3 saniyede bir kaydediliyor."
+                )
+            else:
+                st.info(
+                    "📊 Henüz geçmiş verisi yok.  \n"
+                    "Dashboard açık kaldıkça her 3 saniyede bir veri kaydedilir.  \n"
+                    "**Auto-refresh 3s** aktif olduğunda veriler otomatik birikir."
+                )
 
     # ════ TAB 6: TECHNICAL ════
     with t6:
         st.markdown('<div class="section-title">Technical Details</div>', unsafe_allow_html=True)
 
-        st.markdown('<div class="section-label">Pod Status</div>', unsafe_allow_html=True)
-        pod_out = run_ps(f"kubectl get pods -n {NAMESPACE} -o wide --no-headers 2>$null")
+        if st.button("🔄 Yenile / Refresh", key="tech_refresh"):
+            st.rerun()
+
+        # ── Bağlantı Durumu ──────────────────────────────────────────────
+        st.markdown('<div class="section-label">Bağlantı Durumu</div>', unsafe_allow_html=True)
+        _tc1, _tc2, _tc3 = st.columns(3)
+        def _conn_pill(col, label, url, path="/-/ready"):
+            try:
+                import requests as _req
+                _r = _req.get(url + path, timeout=2)
+                _ok = _r.ok
+            except Exception:
+                _ok = False
+            col.markdown(
+                f'<div class="pill {"pill-ok" if _ok else "pill-warn"}">'
+                f'{"✅" if _ok else "❌"} {label}</div>',
+                unsafe_allow_html=True
+            )
+        _conn_pill(_tc1, "Prometheus :9090", f"{URLS['prometheus']}")
+        _conn_pill(_tc2, "Pushgateway :9091", f"{URLS['pushgateway']}")
+        _conn_pill(_tc3, f"App :{_ACTIVE_PROJECT.get('port',8080)}", f"http://localhost:{_ACTIVE_PROJECT.get('port',8080)}", "/")
+
+        st.markdown("<br>", unsafe_allow_html=True)
+
+        # ── Pod Durumu ───────────────────────────────────────────────────
+        st.markdown('<div class="section-label">Pod Durumu</div>', unsafe_allow_html=True)
+        pod_out = run_ps(f"kubectl get pods -n {NAMESPACE} -o wide 2>$null")
         if pod_out: st.code(pod_out, language="text")
-        else: st.info("No pod data available.")
+        else: st.warning("Pod verisi alınamadı. kubectl çalışıyor mu?")
 
-        st.markdown('<div class="section-label">KEDA ScaledObject</div>', unsafe_allow_html=True)
-        keda_out = run_ps(f"kubectl get scaledobject -n {NAMESPACE} --no-headers 2>$null")
+        # ── KEDA HPA ────────────────────────────────────────────────────
+        st.markdown('<div class="section-label">KEDA / HPA Durumu</div>', unsafe_allow_html=True)
+        hpa_out = run_ps(f"kubectl get hpa -n {NAMESPACE} 2>$null")
+        if hpa_out: st.code(hpa_out, language="text")
+        keda_out = run_ps(f"kubectl get scaledobject -n {NAMESPACE} 2>$null")
         if keda_out: st.code(keda_out, language="text")
-        else: st.info("No ScaledObject found.")
+        else: st.info("ScaledObject bulunamadı.")
 
-        st.markdown('<div class="section-label">Recent Events</div>', unsafe_allow_html=True)
-        ev_out = run_ps(f"kubectl get events -n {NAMESPACE} --sort-by=.lastTimestamp 2>$null | Select-Object -Last 15")
+        # ── Servisler ────────────────────────────────────────────────────
+        st.markdown('<div class="section-label">Servisler</div>', unsafe_allow_html=True)
+        svc_out = run_ps(f"kubectl get svc -n {NAMESPACE} 2>$null")
+        if svc_out: st.code(svc_out, language="text")
+
+        # ── Son Olaylar ──────────────────────────────────────────────────
+        st.markdown('<div class="section-label">Son Olaylar (20)</div>', unsafe_allow_html=True)
+        ev_out = run_ps(
+            f"kubectl get events -n {NAMESPACE} --sort-by=.lastTimestamp 2>$null"
+            f" | Select-Object -Last 20"
+        )
         if ev_out: st.code(ev_out, language="text")
-        else: st.info("No events.")
+        else: st.info("Olay yok.")
 
-        st.markdown('<div class="section-label">Dashboard Logs</div>', unsafe_allow_html=True)
-        if st.button("Refresh Logs"):  st.rerun()
+        # ── Prometheus Hedefleri ──────────────────────────────────────────
+        st.markdown('<div class="section-label">Prometheus Hedefleri</div>', unsafe_allow_html=True)
         try:
-            lines = Path("dashboard.log").read_text(encoding="utf-8").splitlines()
-            st.code("\n".join(lines[-40:]), language="text")
-        except: st.info("Log file not found.")
+            import requests as _req2
+            _tr = _req2.get(f"{URLS['prometheus']}/api/v1/targets", timeout=4)
+            if _tr.ok:
+                _targets = _tr.json().get("data", {}).get("activeTargets", [])
+                _aso = [t for t in _targets if "autoscaleops" in str(t.get("labels", {}))]
+                st.success(f"✅ {len(_targets)} aktif hedef, {len(_aso)} autoscaleops hedefi")
+                if _aso:
+                    for _t in _aso[:5]:
+                        st.code(f"Job: {_t['labels'].get('job','?')}  |  State: {_t['health']}  |  {_t.get('lastScrape','?')[:19]}", language="text")
+            else:
+                st.warning("Prometheus hedefleri alınamadı.")
+        except Exception:
+            st.warning("Prometheus'a bağlanılamıyor (localhost:9090 kapalı).")
+
+        # ── Dashboard Logs ───────────────────────────────────────────────
+        st.markdown('<div class="section-label">Dashboard Log</div>', unsafe_allow_html=True)
+        _log_path = Path.home() / ".autoscaleops" / "logs" / "dashboard.log"
+        try:
+            lines = _log_path.read_text(encoding="utf-8", errors="replace").splitlines()
+            st.code("\n".join(lines[-50:]), language="text")
+        except Exception:
+            try:
+                lines = Path("dashboard.log").read_text(encoding="utf-8", errors="replace").splitlines()
+                st.code("\n".join(lines[-50:]), language="text")
+            except Exception:
+                st.info(f"Log dosyası bulunamadı: {_log_path}")
 
     # ════ TAB 7: SETTINGS ════
     with t7:

@@ -1849,25 +1849,28 @@ class SystemOps:
         for key, preferred, svc, svc_port, ns in SERVICES:
             existing = self._port_forward_procs.get(key)
 
-            # Proc canlı ve port açık → zaten çalışıyor, portu kaydet ve geç
+            # Proc canlı ve port açık → HTTP seviyesinde de doğrula
+            # (Pod restart sonrası TCP open ama HTTP broken olabilir — tüm servisler için kontrol)
             if existing and existing.poll() is None and self._is_port_open(preferred):
                 if key == "app":
-                    # App için TCP yetmez; gerçek HTTP isteği çalışıyor mu kontrol et
-                    # (Pod yeniden başladığında port-forward süreci "canlı" görünür ama HTTP timeout verir)
                     _base = f"http://localhost:{preferred}"
-                    _http_ok = (self._http_ok(f"{_base}/") or
-                                self._http_ok(f"{_base}/health"))
-                    if _http_ok:
-                        used_ports.add(preferred)
-                        continue
-                    # HTTP çalışmıyor → kırık process'i zorla öldür, yeniden başlat
-                    try:
-                        existing.terminate()
-                    except Exception:
-                        pass
+                    _ok = self._http_ok(f"{_base}/") or self._http_ok(f"{_base}/health")
+                elif key == "prometheus":
+                    _ok = self._http_ok(f"http://localhost:{preferred}/-/ready")
+                elif key == "pushgateway":
+                    _ok = (self._http_ok(f"http://localhost:{preferred}/-/ready") or
+                           self._http_ok(f"http://localhost:{preferred}/"))
                 else:
+                    _ok = True  # Bilinmeyen servis için TCP yeterli
+
+                if _ok:
                     used_ports.add(preferred)
                     continue
+                # HTTP çalışmıyor → kırık process'i zorla öldür, yeniden başlat
+                try:
+                    existing.terminate()
+                except Exception:
+                    pass
 
             # Proc'u temizle
             if existing:
