@@ -409,52 +409,33 @@ try {
 } catch {}
 INFO "Profil: $PROFILE_NAME"
 
-# Bozuk minikube profil dosyalarini bastan temizle (GUEST_NOT_FOUND onlemi)
-function Clear-MinikubeProfile {
-    param($name)
-    minikube delete -p $name 2>&1 | Out-Null
-    # minikube delete bozuk profilde calismazsa dosyalari dogrudan sil
-    $paths = @(
-        "$env:USERPROFILE\.minikube\machines\$name",
-        "$env:USERPROFILE\.minikube\profiles\$name"
-    )
-    foreach ($p in $paths) {
-        if (Test-Path $p) {
-            Remove-Item $p -Recurse -Force -ErrorAction SilentlyContinue
-        }
-    }
+# ── Bozuk profil onlemi (GUEST_NOT_FOUND) ─────────────────────────────────
+# machines klasoru var ama config.json yok = bozuk profil
+# minikube start denemeden ONCE temizle; Remove-Item yerine cmd rd kullan
+$mkMachineDir = "$env:USERPROFILE\.minikube\machines\$PROFILE_NAME"
+$mkProfileDir = "$env:USERPROFILE\.minikube\profiles\$PROFILE_NAME"
+
+if ((Test-Path $mkMachineDir) -and (-not (Test-Path "$mkMachineDir\config.json"))) {
+    WARN "Bozuk minikube profili tespit edildi - temizleniyor..."
+    minikube delete -p $PROFILE_NAME 2>&1 | Out-Null
+    if (Test-Path $mkMachineDir) { cmd /c "rd /s /q `"$mkMachineDir`"" }
+    if (Test-Path $mkProfileDir) { cmd /c "rd /s /q `"$mkProfileDir`"" }
+    OK "Profil temizlendi, sifirdan baslatilacak."
 }
+# ──────────────────────────────────────────────────────────────────────────
 
 minikube status -p $PROFILE_NAME 2>&1 | Out-Null
 if ($LASTEXITCODE -eq 0) {
     OK "Cluster zaten calisiyor."
 } else {
     INFO "Cluster baslatiliyor (1-3 dk)..."
-    $mkOut = minikube start -p $PROFILE_NAME --driver=docker --cpus=4 --memory=6144 2>&1
-    $mkOut | Select-Object -Last 5
+    minikube start -p $PROFILE_NAME --driver=docker --cpus=4 --memory=6144 2>&1 | Select-Object -Last 5
     if ($LASTEXITCODE -ne 0) {
-        if ($mkOut -match "GUEST_NOT_FOUND") {
-            WARN "Bozuk minikube profili tespit edildi - temizleniyor..."
-            Clear-MinikubeProfile $PROFILE_NAME
-            INFO "Temiz cluster baslatiliyor..."
-            $mkOut = minikube start -p $PROFILE_NAME --driver=docker --cpus=4 --memory=6144 2>&1
-            $mkOut | Select-Object -Last 5
-        }
+        WARN "Yuksek kaynak basarisiz - dusuk kaynak ile deneniyor..."
+        minikube start -p $PROFILE_NAME --driver=docker --cpus=2 --memory=4096 2>&1 | Select-Object -Last 5
         if ($LASTEXITCODE -ne 0) {
-            WARN "Yuksek kaynak basarisiz - dusuk kaynak ile deneniyor..."
-            $mkOut = minikube start -p $PROFILE_NAME --driver=docker --cpus=2 --memory=4096 2>&1
-            $mkOut | Select-Object -Last 5
-            if ($LASTEXITCODE -ne 0) {
-                if ($mkOut -match "GUEST_NOT_FOUND") {
-                    WARN "Bozuk profil tekrar tespit edildi - temizleniyor..."
-                    Clear-MinikubeProfile $PROFILE_NAME
-                    minikube start -p $PROFILE_NAME --driver=docker --cpus=2 --memory=4096 2>&1 | Select-Object -Last 5
-                }
-                if ($LASTEXITCODE -ne 0) {
-                    ERR "Cluster baslanamadi. Docker acik ve yeterli RAM var mi?"
-                    Read-Host "Enter ile cik"; exit 1
-                }
-            }
+            ERR "Cluster baslanamadi. Docker acik ve yeterli RAM var mi?"
+            Read-Host "Enter ile cik"; exit 1
         }
     }
     OK "Cluster hazir."
