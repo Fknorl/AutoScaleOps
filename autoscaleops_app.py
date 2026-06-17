@@ -1349,9 +1349,10 @@ class AppDatabase:
             return {}
 
         # Tüm (gün, saat) çiftlerinin RPS ortalamasını saat bazında grupla
+        # samples >= 1: az veriyle de çalışsın (aynı gün 2 kez görülmesi gerekmez)
         hour_totals: dict[int, list] = {h: [] for h in range(24)}
         for (dow, hour), info in pattern.items():
-            if info["samples"] >= 2:   # En az 2 örnek şartı
+            if info["samples"] >= 1:
                 hour_totals[hour].append(info["avg_rps"])
 
         hour_avgs = {h: sum(vals)/len(vals)
@@ -7631,7 +7632,8 @@ class DashboardPanel(QWidget):
         "orta":       "#a3e635",
         "düşük":      "#4ade80",
     }
-    LEVEL_MULT = {"çok_yüksek": 1.80, "yüksek": 1.50, "orta": 1.30, "düşük": 1.15}
+    LEVEL_MULT   = {"çok_yüksek": 1.80, "yüksek": 1.50, "orta": 1.30, "düşük": 1.15}
+    SEVIYE_MARGIN = {"çok_yüksek": 0.80, "yüksek": 0.50, "orta": 0.30, "düşük": 0.15}
 
     # ── Tab Builders ────────────────────────────────────────────────────────
     def _build_analysis_tab(self) -> QWidget:
@@ -8194,64 +8196,192 @@ class DashboardPanel(QWidget):
         self._user_events_layout.setContentsMargins(14, 10, 14, 10)
         self._user_events_layout.setSpacing(4)
         lay.addWidget(self._user_events_frame)
+
+        # Durum etiketi — Uygula/İptal sonucu burada görünür
+        self._ev_status_lbl = QLabel("")
+        self._ev_status_lbl.setStyleSheet(
+            f"color:{C_GREEN}; font-size:11px; background:transparent; border:none; padding:2px 0;"
+        )
+        lay.addWidget(self._ev_status_lbl)
+
         lay.addStretch()
         QTimer.singleShot(500, self._refresh_events_list)
         return w
 
     def _refresh_events_list(self):
         import datetime as _dt
-        # Clear upcoming
-        for i in reversed(range(self._upcoming_layout.count())):
-            item = self._upcoming_layout.itemAt(i)
-            if item and item.widget():
-                item.widget().deleteLater()
+
+        # ── Yaklaşan Özel Günler ────────────────────────────────────────────
+        while self._upcoming_layout.count():
+            child = self._upcoming_layout.takeAt(0)
+            if child.widget():
+                child.widget().setParent(None)
         upcoming = self._get_upcoming_events(14)
+
+        # Mevcut AI domain_events: (name, date_iso) seti
+        try:
+            applied_set = {(e["name"], e["event_date"]) for e in self.db.get_domain_events()}
+        except Exception:
+            applied_set = set()
+
         if upcoming:
             for ev in upcoming:
-                clr = self.LEVEL_COLOR.get(ev.get("level",""), "#aaa")
-                diff = ev["diff"]
+                clr      = self.LEVEL_COLOR.get(ev.get("level", ""), "#aaa")
+                diff     = ev["diff"]
                 diff_txt = "Bugün!" if diff == 0 else f"{diff} gün sonra"
-                row_lbl = QLabel(f"★  {ev['name']}  —  {ev['date']}  •  ×{ev['mult']}  •  {diff_txt}")
+                try:
+                    ev_date_iso = _dt.datetime.strptime(ev["date"], "%d.%m.%Y").date().isoformat()
+                except Exception:
+                    ev_date_iso = ""
+                is_applied = (ev["name"], ev_date_iso) in applied_set
+
+                row_w  = QWidget()
+                row_w.setStyleSheet("background:transparent; border:none;")
+                row_hl = QHBoxLayout(row_w)
+                row_hl.setContentsMargins(0, 0, 0, 0)
+                row_hl.setSpacing(6)
+
+                txt = f"★  {ev['name']}  —  {ev['date']}  •  ×{ev['mult']}  •  {diff_txt}"
+                if is_applied:
+                    txt += "  ✓ AI"
+                row_lbl = QLabel(txt)
                 row_lbl.setStyleSheet(f"color:{clr}; font-size:12px; background:transparent; border:none; padding:2px 0;")
-                self._upcoming_layout.addWidget(row_lbl)
+                row_hl.addWidget(row_lbl, 1)
+
+                if not is_applied and ev_date_iso:
+                    btn_ap = QPushButton("Uygula")
+                    btn_ap.setFixedHeight(24)
+                    btn_ap.setToolTip("AI profiline ekle")
+                    btn_ap.setStyleSheet(
+                        f"QPushButton {{ background:{C_ACCENT}; color:#fff; border:none; border-radius:6px; font-size:11px; padding:2px 10px; }}"
+                    )
+                    def make_apply(name, date_iso, level):
+                        def _apply():
+                            try:
+                                margin = self.SEVIYE_MARGIN.get(level, 0.30)
+                                self.db.add_domain_event(name, date_iso, margin)
+                                self.ops.sync_domain_profile()
+                                self._ev_status_lbl.setStyleSheet(
+                                    f"color:{C_GREEN}; font-size:11px; background:transparent; border:none; padding:2px 0;"
+                                )
+                                self._ev_status_lbl.setText(
+                                    f"✓  '{name}' AI profiline eklendi (+%{int(margin*100)} marj)"
+                                )
+                                QTimer.singleShot(5000, lambda: self._ev_status_lbl.setText(""))
+                            except Exception as exc:
+                                self._ev_status_lbl.setStyleSheet(
+                                    f"color:{C_RED}; font-size:11px; background:transparent; border:none; padding:2px 0;"
+                                )
+                                self._ev_status_lbl.setText(f"✗  Hata: {exc}")
+                            self._refresh_events_list()
+                        return _apply
+                    btn_ap.clicked.connect(make_apply(ev["name"], ev_date_iso, ev.get("level", "orta")))
+                    row_hl.addWidget(btn_ap)
+                elif is_applied and ev_date_iso:
+                    btn_ip = QPushButton("İptal")
+                    btn_ip.setFixedHeight(24)
+                    btn_ip.setToolTip("AI profilinden kaldır")
+                    btn_ip.setStyleSheet(
+                        f"QPushButton {{ background:rgba(255,255,255,0.08); color:{C_TEXT_DIM}; border:none; border-radius:6px; font-size:11px; padding:2px 10px; }}"
+                    )
+                    def make_cancel(name, date_iso):
+                        def _cancel():
+                            try:
+                                removed = False
+                                for de in self.db.get_domain_events():
+                                    if de["name"] == name and de["event_date"] == date_iso:
+                                        self.db.delete_domain_event(de["id"])
+                                        removed = True
+                                        break
+                                self.ops.sync_domain_profile()
+                                self._ev_status_lbl.setStyleSheet(
+                                    f"color:{C_TEXT_DIM}; font-size:11px; background:transparent; border:none; padding:2px 0;"
+                                )
+                                msg = f"✗  '{name}' AI profilinden kaldırıldı" if removed else f"'{name}' zaten AI profilinde değil"
+                                self._ev_status_lbl.setText(msg)
+                                QTimer.singleShot(5000, lambda: self._ev_status_lbl.setText(""))
+                            except Exception as exc:
+                                self._ev_status_lbl.setStyleSheet(
+                                    f"color:{C_RED}; font-size:11px; background:transparent; border:none; padding:2px 0;"
+                                )
+                                self._ev_status_lbl.setText(f"✗  Hata: {exc}")
+                            self._refresh_events_list()
+                        return _cancel
+                    btn_ip.clicked.connect(make_cancel(ev["name"], ev_date_iso))
+                    row_hl.addWidget(btn_ip)
+
+                self._upcoming_layout.addWidget(row_w)
         else:
             lbl = QLabel("Önümüzdeki 14 günde özel etkinlik yok.")
             lbl.setStyleSheet(f"color:{C_TEXT_DIM}; font-size:12px; background:transparent; border:none;")
             self._upcoming_layout.addWidget(lbl)
 
-        # User events
-        for i in reversed(range(self._user_events_layout.count())):
-            item = self._user_events_layout.itemAt(i)
-            if item and item.widget():
-                item.widget().deleteLater()
+        # ── Kullanıcı Etkinlikleri ───────────────────────────────────────────
+        # Eski widget'ları tamamen yok et
+        while self._user_events_layout.count():
+            child = self._user_events_layout.takeAt(0)
+            if child.widget():
+                child.widget().setParent(None)
+
         events = self._load_events()
-        if events:
-            for idx_ev, ev in enumerate(events):
-                clr = self.LEVEL_COLOR.get(ev.get("seviye",""), "#aaa")
-                ev_row = QHBoxLayout()
-                lbl = QLabel(f"◆  {ev.get('ad','?')}  •  {ev.get('baslangic','')} → {ev.get('bitis','')}  •  {ev.get('seviye','')}")
-                lbl.setStyleSheet(f"color:{clr}; font-size:12px; background:transparent; border:none;")
-                btn_del = QPushButton("🗑")
-                btn_del.setFixedSize(28, 28)
-                btn_del.setToolTip("Sil")
-                def make_del(i):
-                    def _del():
-                        evs = self._load_events()
-                        evs.pop(i)
-                        self._save_events(evs)
-                        self._refresh_events_list()
-                    return _del
-                btn_del.clicked.connect(make_del(idx_ev))
-                ev_row.addWidget(lbl, 1)
-                ev_row.addWidget(btn_del)
-                container = QWidget()
-                container.setStyleSheet("background:transparent; border:none;")
-                container.setLayout(ev_row)
-                self._user_events_layout.addWidget(container)
-        else:
+        if not events:
             lbl = QLabel("Henüz kullanıcı etkinliği eklenmedi.")
             lbl.setStyleSheet(f"color:{C_TEXT_DIM}; font-size:12px; background:transparent; border:none;")
             self._user_events_layout.addWidget(lbl)
+        else:
+            for idx_ev, ev in enumerate(events):
+                clr = self.LEVEL_COLOR.get(ev.get("seviye", ""), "#aaa")
+
+                container = QWidget()
+                container.setStyleSheet("background:transparent; border:none;")
+                row = QHBoxLayout(container)
+                row.setContentsMargins(0, 2, 0, 2)
+                row.setSpacing(8)
+
+                ad       = ev.get("ad", "?")
+                baslangic = ev.get("baslangic", "")
+                bitis     = ev.get("bitis", "")
+                seviye    = ev.get("seviye", "")
+                lbl = QLabel(f"◆  {ad}  •  {baslangic} → {bitis}  •  {seviye}")
+                lbl.setStyleSheet(
+                    f"color:{clr}; font-size:12px; background:transparent; border:none;"
+                )
+                lbl.setWordWrap(False)
+
+                btn_sil = QPushButton("Sil")
+                btn_sil.setFixedHeight(26)
+                btn_sil.setFixedWidth(48)
+                btn_sil.setStyleSheet(
+                    "QPushButton { background:#ef4444; color:#fff; border:none; "
+                    "border-radius:6px; font-size:11px; font-weight:600; }"
+                    "QPushButton:hover { background:#dc2626; }"
+                )
+
+                def _make_del(index):
+                    def _do_del():
+                        evs = self._load_events()
+                        if 0 <= index < len(evs):
+                            removed_ev = evs.pop(index)
+                            self._save_events(evs)
+                            # AI profilden de temizle (varsa)
+                            try:
+                                ev_name = removed_ev.get("ad", "")
+                                ev_date = removed_ev.get("baslangic", "")[:10]
+                                for de in self.db.get_domain_events():
+                                    if de["name"] == ev_name and de["event_date"] == ev_date:
+                                        self.db.delete_domain_event(de["id"])
+                                        self.ops.sync_domain_profile()
+                                        break
+                            except Exception:
+                                pass
+                        self._refresh_events_list()
+                    return _do_del
+
+                btn_sil.clicked.connect(_make_del(idx_ev))
+
+                row.addWidget(lbl, 1)
+                row.addWidget(btn_sil)
+                self._user_events_layout.addWidget(container)
 
     def _add_event_dialog(self):
         dlg = QDialog(self)
@@ -8316,6 +8446,10 @@ class DashboardPanel(QWidget):
                 evs = self._load_events()
                 evs.append(ev)
                 self._save_events(evs)
+                # AI profiline de kaydet
+                margin = self.SEVIYE_MARGIN.get(ev["seviye"], 0.30)
+                self.db.add_domain_event(ev["ad"], ev["baslangic"], margin)
+                self.ops.sync_domain_profile()
                 self._refresh_events_list()
 
     def _load_events(self) -> list:
@@ -9761,9 +9895,12 @@ class ProfileAdvisor(QObject):
             hour=0, minute=0, second=0, microsecond=0
         ).timestamp()
 
-        self.advisor_log.emit("Profil danismani: Prometheus'tan veri cekiliyor...", "info")
+        self.advisor_log.emit("─" * 40, "info")
+        self.advisor_log.emit("Profil Danismani baslatildi", "info")
 
-        # ── 1. Bugünün saatlik RPS ortalamalarını çek ─────────────────────
+        # ── 1. Prometheus'tan bugünün saatlik RPS verisini çek ─────────────
+        self.advisor_log.emit("  [1/4] Prometheus sorgulanıyor (127.0.0.1:9090)...", "info")
+        prom_ok = False
         try:
             resp = _req.get(
                 self.PROM_URL,
@@ -9775,7 +9912,7 @@ class ProfileAdvisor(QObject):
                 },
                 timeout=10
             )
-            data = resp.json()
+            data  = resp.json()
             saved = 0
             if data.get("status") == "success" and data["data"]["result"]:
                 for ts, v in data["data"]["result"][0].get("values", []):
@@ -9784,73 +9921,106 @@ class ProfileAdvisor(QObject):
                     if rps > 0:
                         self.db.save_hourly_rps(today_str, hour, rps)
                         saved += 1
+            prom_ok = True
             if saved:
-                self.advisor_log.emit(
-                    f"  {saved} saatlik RPS verisi kaydedildi ({today_str})", "ok"
-                )
-        except Exception as e:
-            self.advisor_log.emit(f"  Prometheus hatasi: {e}", "warn")
-            return
+                self.advisor_log.emit(f"       {saved} saatlik nokta kaydedildi ({today_str})", "ok")
+            else:
+                self.advisor_log.emit("       Bugun henuz trafik verisi yok", "info")
+        except Exception:
+            self.advisor_log.emit(
+                "       Prometheus erisilemez — port-forward kapali olabilir.\n"
+                "       Devam: veritabanindaki birikimli veri kullanilacak.", "warn"
+            )
 
-        # ── 2. Haftalık örüntü tablosunu yeniden hesapla ──────────────────
-        self.db.rebuild_weekly_pattern()
-
-        # ── 3. Yeterli veri var mı? ────────────────────────────────────────
-        pattern = self.db.get_weekly_pattern()
-        if not pattern:
-            self.advisor_log.emit("  Henuz haftalik oruntu yok — veri birikmesi bekleniyor.", "info")
-            return
-
-        # Kaç farklı gün var?
-        import datetime as _dt2
+        # ── 2. Kaç günlük veri var? ────────────────────────────────────────
         with self.db._lock:
             cur = self.db.conn.execute(
                 "SELECT COUNT(DISTINCT date) FROM hourly_rps_history"
             )
             unique_days = cur.fetchone()[0]
 
+        self.advisor_log.emit(
+            f"  [2/4] Birikmis veri: {unique_days} gun "
+            f"(minimum {self.MIN_DAYS_FOR_AUTO} gun gerekli)", "info"
+        )
+
+        if unique_days == 0:
+            self.advisor_log.emit(
+                "       Hic veri yok. Prometheus aktif ve port-forward\n"
+                "       acikken sistem otomatik biriktirir.", "warn"
+            )
+            self.advisor_log.emit("─" * 40, "info")
+            return
+
+        # ── 3. Haftalık örüntü tablosunu yeniden hesapla ──────────────────
+        self.advisor_log.emit("  [3/4] Saatlik oruntu hesaplaniyor...", "info")
+        self.db.rebuild_weekly_pattern()
+        pattern = self.db.get_weekly_pattern()
+
+        if not pattern:
+            self.advisor_log.emit("       Oruntu olusturulamadi — veri yetersiz.", "warn")
+            self.advisor_log.emit("─" * 40, "info")
+            return
+
         if unique_days < self.MIN_DAYS_FOR_AUTO:
             self.advisor_log.emit(
-                f"  {unique_days}/{self.MIN_DAYS_FOR_AUTO} gun birikmis — "
-                f"otomatik agirlik icin {self.MIN_DAYS_FOR_AUTO} gun gerekli.", "info"
+                f"       {unique_days}/{self.MIN_DAYS_FOR_AUTO} gun birikmis — "
+                f"daha {self.MIN_DAYS_FOR_AUTO - unique_days} gun daha gerekli.\n"
+                "       Simdilik profil degistirilmeyecek.", "warn"
             )
+            self.advisor_log.emit("─" * 40, "info")
             return
 
-        # ── 4. Otomatik ağırlıkları hesapla ve uygula ────────────────────
+        # ── 4. Ağırlıkları hesapla ve sliderları güncelle ─────────────────
+        self.advisor_log.emit("  [4/4] Agirliklar hesaplanip profile yaziliyor...", "info")
         auto_weights = self.db.compute_auto_weights()
         if not auto_weights:
+            self.advisor_log.emit("       Agirlik hesaplanamadi.", "warn")
+            self.advisor_log.emit("─" * 40, "info")
             return
 
-        # Mevcut profili al, sadece veri olan saatleri güncelle
         current_profile = self.db.get_traffic_profile()
         updates = {}
         changes = []
         for hour, new_w in auto_weights.items():
             old_w = current_profile.get(hour, {}).get("weight", 1.0)
-            # Büyük farklılık varsa (>%15) güncelle
-            if abs(new_w - old_w) > 0.15:
+            if abs(new_w - old_w) > 0.15:   # %15'ten büyük değişimde güncelle
                 updates[hour] = {"weight": new_w, "label": "auto"}
-                changes.append(f"  Saat {hour:02d}: {old_w:.2f} → {new_w:.2f}")
+                changes.append((hour, old_w, new_w))
 
         if updates:
+            # Tüm saatleri yaz: değişen → yeni, değişmeyen → eski
             self.db.set_full_profile({
-                h: updates.get(h, {"weight": current_profile.get(h, {}).get("weight", 1.0),
-                                   "label":  current_profile.get(h, {}).get("label", "")})
+                h: updates.get(h, {
+                    "weight": current_profile.get(h, {}).get("weight", 1.0),
+                    "label":  current_profile.get(h, {}).get("label", "")
+                })
                 for h in range(24)
             })
-            self.ops.sync_domain_profile()   # predictor.py'ye bildir
-            self.profile_updated.emit()      # UI slider'larını güncelle (main thread)
+            self.ops.sync_domain_profile()   # predictor.py'ye bildir (tek yer)
+            self.profile_updated.emit()      # UI slider'larını yenile (main thread)
+
             self.advisor_log.emit(
-                f"  Otomatik agirliklar guncellendi ({len(updates)} saat):", "ok"
+                f"       {len(updates)} saat guncellendi "
+                f"(kaydiricilar otomatik ayarlandi):", "ok"
             )
-            for c in changes[:5]:   # En fazla 5 satır göster
-                self.advisor_log.emit(c, "info")
-            if len(changes) > 5:
-                self.advisor_log.emit(f"  ... ve {len(changes)-5} saat daha", "info")
+            for hour, old_w, new_w in sorted(changes)[:8]:
+                arrow = "▲" if new_w > old_w else "▼"
+                self.advisor_log.emit(
+                    f"         Saat {hour:02d}:00  {old_w:.2f} {arrow} {new_w:.2f}", "info"
+                )
+            if len(changes) > 8:
+                self.advisor_log.emit(f"         ... ve {len(changes)-8} saat daha", "info")
+            self.advisor_log.emit(
+                "       Not: kaydiriciyi elle cekerseniz degisim kalici olur.", "info"
+            )
         else:
             self.advisor_log.emit(
-                f"  Profil guncel — buyuk degisim yok ({unique_days} gunluk veri).", "ok"
+                f"       Profil zaten guncel — {unique_days} gunluk veriye gore\n"
+                "       hicbir saatte %15'ten fazla fark yok.", "ok"
             )
+
+        self.advisor_log.emit("─" * 40, "info")
 
 
 # ─────────────────────────────────────────────
@@ -9889,6 +10059,11 @@ class AiProfilePanel(QWidget):
         self._timer = QTimer(self)
         self._timer.timeout.connect(self._refresh_live)
         self._timer.start(30000)   # Her 30 saniyede güncelle
+
+        # Etkinlik listesi: 4 saniyede bir otomatik yenile (Dashboard'dan ekleme görünsün)
+        self._ev_refresh_timer = QTimer(self)
+        self._ev_refresh_timer.timeout.connect(self._load_events)
+        self._ev_refresh_timer.start(4000)
 
         # Danışman: ilk çalıştırma 5 dk sonra, sonra her saat
         QTimer.singleShot(300000, self._advisor.run_cycle)

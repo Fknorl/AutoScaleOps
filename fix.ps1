@@ -426,6 +426,11 @@ if ($LASTEXITCODE -eq 0) {
     OK "Cluster hazir."
 }
 
+# Context her durumda set edilmeli - cluster calisiyorsa da atlanmamali
+minikube update-context -p $PROFILE_NAME 2>&1 | Out-Null
+kubectl config use-context $PROFILE_NAME 2>&1 | Out-Null
+OK "kubectl context ayarlandi: $PROFILE_NAME"
+
 kubectl create namespace $PROFILE_NAME --dry-run=client -o yaml 2>&1 | kubectl apply -f - 2>&1 | Out-Null
 if ($LASTEXITCODE -eq 0) { OK "Namespace hazir: $PROFILE_NAME" }
 else { WARN "Namespace olusturulamadi - devam ediliyor." }

@@ -3,7 +3,7 @@ AutoScaleOps Professional Dashboard v3.0
 Redesigned with Syne + DM Mono — Industrial Terminal Aesthetic
 """
 
-import json, os, shutil, socket, subprocess, threading, time, logging, calendar, io
+import json, os, shutil, socket, sqlite3, subprocess, threading, time, logging, calendar, io
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional
@@ -800,6 +800,94 @@ def get_upcoming_user_events(days=7) -> List[Dict]:
     return sorted(out, key=lambda x: x["days_until"])
 
 
+# ── AI Profil Köprüsü ────────────────────────────────────────────────────────
+_AI_DB        = Path.home() / ".autoscaleops" / "autoscaleops.db"
+_PROFILE_PATH = Path.home() / ".autoscaleops" / "domain_profile.json"
+
+LEVEL_TO_MARGIN = {
+    "Low": 0.15, "Medium": 0.30, "High": 0.50, "Very High": 0.80,
+    "Dusuk": 0.15, "Orta": 0.30, "Yuksek": 0.50, "Cok Yuksek": 0.80,
+    "dusuk": 0.15, "orta": 0.30, "yuksek": 0.50, "cok_yuksek": 0.80,
+    "çok_yüksek": 0.80, "yüksek": 0.50, "düşük": 0.15,
+}
+
+
+def _ai_sync_profile(conn) -> None:
+    """domain_events → domain_profile.json (predictor.py'nin okuduğu dosya)."""
+    try:
+        rows = conn.execute(
+            "SELECT name, event_date, safety_margin FROM domain_events ORDER BY event_date"
+        ).fetchall()
+        events = [{"name": r[0], "date": r[1], "margin": r[2]} for r in rows]
+        profile: dict = {"hours": {str(h): 1.0 for h in range(24)}, "events": events}
+        if _PROFILE_PATH.exists():
+            try:
+                existing = json.loads(_PROFILE_PATH.read_text(encoding="utf-8"))
+                profile["hours"] = existing.get("hours", profile["hours"])
+            except Exception:
+                pass
+        _PROFILE_PATH.write_text(json.dumps(profile, indent=2, ensure_ascii=False), encoding="utf-8")
+    except Exception as e:
+        logger.error(f"_ai_sync_profile hata: {e}")
+
+
+def ai_get_applied() -> set:
+    """domain_events'ten kayıtlı (name, date) çiftlerini döner."""
+    if not _AI_DB.exists():
+        return set()
+    try:
+        conn = sqlite3.connect(str(_AI_DB))
+        rows = conn.execute("SELECT name, event_date FROM domain_events").fetchall()
+        conn.close()
+        return {(r[0], r[1]) for r in rows}
+    except Exception:
+        return set()
+
+
+def ai_apply_event(name: str, event_date: str, margin: float) -> bool:
+    """Etkinliği domain_events tablosuna yazar ve domain_profile.json günceller."""
+    if not _AI_DB.exists():
+        return False
+    try:
+        conn = sqlite3.connect(str(_AI_DB))
+        existing = conn.execute(
+            "SELECT id FROM domain_events WHERE name=? AND event_date=?", (name, event_date)
+        ).fetchone()
+        if existing:
+            conn.execute(
+                "UPDATE domain_events SET safety_margin=? WHERE name=? AND event_date=?",
+                (margin, name, event_date),
+            )
+        else:
+            conn.execute(
+                "INSERT INTO domain_events (name, event_date, safety_margin, notes) VALUES (?,?,?,?)",
+                (name, event_date, margin, "Dashboard'dan eklendi"),
+            )
+        conn.commit()
+        _ai_sync_profile(conn)
+        conn.close()
+        return True
+    except Exception as e:
+        logger.error(f"ai_apply_event hata: {e}")
+        return False
+
+
+def ai_remove_event(name: str, event_date: str) -> bool:
+    """Etkinliği domain_events tablosundan siler ve domain_profile.json günceller."""
+    if not _AI_DB.exists():
+        return False
+    try:
+        conn = sqlite3.connect(str(_AI_DB))
+        conn.execute("DELETE FROM domain_events WHERE name=? AND event_date=?", (name, event_date))
+        conn.commit()
+        _ai_sync_profile(conn)
+        conn.close()
+        return True
+    except Exception as e:
+        logger.error(f"ai_remove_event hata: {e}")
+        return False
+
+
 def load_greenops() -> Dict:
     if GREENOPS_FILE.exists():
         try: return json.loads(GREENOPS_FILE.read_text())
@@ -1079,9 +1167,22 @@ def main():
     # ── UPCOMING EVENTS STRIP ────────────────────────────────────────────────
     upcoming = get_upcoming_special(14)
     user_up  = get_upcoming_user_events(14)
-    all_up   = sorted(upcoming + [
-        {**e, "name": e.get("ad","")} for e in user_up
-    ], key=lambda x: x["days_until"])[:8]
+
+    def _norm_ev(ev, is_special: bool) -> dict:
+        if is_special:
+            tl = ev.get("traffic_level", "")
+            return {**ev, "display_name": ev.get("name", ""), "ai_date": ev.get("event_date", ""),
+                    "ai_margin": LEVEL_TO_MARGIN.get(tl, 0.30)}
+        else:
+            tl = ev.get("seviye", "")
+            return {**ev, "name": ev.get("ad", ""), "display_name": ev.get("ad", ""),
+                    "traffic_level": tl, "ai_date": ev["baslangic"][:10],
+                    "ai_margin": LEVEL_TO_MARGIN.get(tl, 0.30)}
+
+    all_up = sorted(
+        [_norm_ev(e, True) for e in upcoming] + [_norm_ev(e, False) for e in user_up],
+        key=lambda x: x["days_until"]
+    )[:8]
 
     if all_up:
         st.markdown('<div class="section-label">Upcoming Events</div>', unsafe_allow_html=True)
@@ -1090,10 +1191,47 @@ def main():
             ti = TRAFFIC_LEVEL_MAP.get(ev.get("traffic_level",""), ("", "", "#64748b"))
             chips += f"""<div class="upcoming-chip">
                 <span class="days">{ev['days_until']}d</span>
-                <div><div class="name">{ev.get('name','')}</div>
-                <div class="level">{ti[0] if ti[0] else 'custom'}</div></div>
+                <div><div class="name">{ev['display_name']}</div>
+                <div class="level">{ti[0] if ti[0] else 'özel'}</div></div>
             </div>"""
         st.markdown(f'<div class="upcoming-strip">{chips}</div>', unsafe_allow_html=True)
+
+        # ── AI Profil Etkinlik Önerileri ─────────────────────────────────
+        applied = ai_get_applied()
+        st.markdown(
+            '<div class="section-label" style="font-size:11px;margin-top:6px;opacity:.7;">'
+            'AI Profil — Etkinlik Önerileri</div>',
+            unsafe_allow_html=True,
+        )
+        for ev in all_up:
+            ev_name = ev["display_name"]
+            ev_date = ev["ai_date"]
+            margin  = ev["ai_margin"]
+            if not ev_name or not ev_date:
+                continue
+            is_applied = (ev_name, ev_date) in applied
+            c1, c2, c3 = st.columns([7, 1, 1])
+            with c1:
+                badge = " · **✓ AI aktif**" if is_applied else ""
+                st.markdown(
+                    f"<span style='font-size:12px;'>{ev_name} — {ev['days_until']}g "
+                    f"· +%{int(margin*100)} marj{badge}</span>",
+                    unsafe_allow_html=True,
+                )
+            with c2:
+                if not is_applied:
+                    if st.button("Uygula", key=f"ap_{ev_name}_{ev_date}",
+                                 type="primary", use_container_width=True):
+                        if ai_apply_event(ev_name, ev_date, margin):
+                            st.toast(f"✓ {ev_name} AI profiline eklendi")
+                            st.rerun()
+            with c3:
+                if is_applied:
+                    if st.button("İptal", key=f"ca_{ev_name}_{ev_date}",
+                                 use_container_width=True):
+                        if ai_remove_event(ev_name, ev_date):
+                            st.toast(f"✗ {ev_name} AI profilinden kaldırıldı")
+                            st.rerun()
 
     # ── PROMETHEUS BAĞLANTI KONTROLÜ ─────────────────────────────────────────
     _prom_ok = False
@@ -1464,7 +1602,10 @@ def main():
                         st.session_state.editing_idx = idx; st.rerun()
                 with ec3:
                     if st.button("Del", key=f"del_{idx}"):
-                        delete_event(idx); st.session_state.events = load_events()
+                        ev_del = user_evs[idx]
+                        ai_remove_event(ev_del.get("ad", ""), ev_del.get("baslangic", "")[:10])
+                        delete_event(idx)
+                        st.session_state.events = load_events()
                         st.toast("Deleted"); time.sleep(0.3); st.rerun()
 
         st.markdown('<div class="section-label">Add / Edit Event</div>', unsafe_allow_html=True)
@@ -1491,10 +1632,18 @@ def main():
             if submitted and ev_name:
                 new_ev = {"ad":ev_name,"baslangic":ev_start.isoformat(),"bitis":ev_end.isoformat(),
                           "seviye":ev_level,"aciklama":ev_desc}
-                if edit_ev: update_event(edit_i, new_ev); st.session_state.editing_idx = None
-                else: add_event(new_ev)
+                if edit_ev:
+                    # Eski kayıt varsa AI profilden sil, yenisiyle ekle
+                    ai_remove_event(edit_ev.get("ad",""), edit_ev.get("baslangic","")[:10])
+                    update_event(edit_i, new_ev)
+                    st.session_state.editing_idx = None
+                else:
+                    add_event(new_ev)
                 st.session_state.events = load_events()
-                st.toast("Saved!"); time.sleep(0.3); st.rerun()
+                # AI profiline de kaydet (yoğunluk → marj)
+                margin = LEVEL_TO_MARGIN.get(ev_level, 0.30)
+                ai_apply_event(ev_name, ev_start.isoformat(), margin)
+                st.toast("Saved! ✓ AI profiline de eklendi"); time.sleep(0.3); st.rerun()
 
     # ════ TAB 3: ANALYSIS ════
     with t3:

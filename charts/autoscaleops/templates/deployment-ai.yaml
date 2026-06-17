@@ -35,6 +35,12 @@ spec:
               value: {{ .Values.aiModel.env.forecastHorizon | default "5" | quote }}
             - name: CI_LEVEL
               value: {{ .Values.aiModel.env.ciLevel | default "0.95" | quote }}
+            - name: DOMAIN_PROFILE_PATH
+              value: "/config/profile.json"
+          volumeMounts:
+            - name: domain-profile
+              mountPath: /config
+              readOnly: true
           resources:
             requests:
               cpu: {{ .Values.aiModel.resources.requests.cpu }}
@@ -44,3 +50,7 @@ spec:
               memory: {{ .Values.aiModel.resources.limits.memory }}
           # Note: No liveness probe — predictor has no HTTP endpoint.
           # Health is monitored via Pushgateway metric staleness.
+      volumes:
+        - name: domain-profile
+          configMap:
+            name: domain-profile

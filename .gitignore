@@ -51,4 +51,11 @@ dist/
 .claude/settings.json
 .claude/worktrees/
 .claude/plans/
+.claude/update_memory.ps1
 # .claude/commands/ TAKIP EDILIR (ajan komutlari)
+
+# Belge arsivi (buyuk dosyalar, test sonuclari)
+Belgeler/
+
+# Claude hafiza dosyalari
+memory/
