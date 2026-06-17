@@ -1,14 +1,13 @@
-# AutoScaleOps — Sifirlama Aracı
-# Calistirmak icin: sag tik → "PowerShell ile Calistir"
+# AutoScaleOps - Sifirlama Araci
 
 $ErrorActionPreference = "SilentlyContinue"
 
 function Write-Title {
     Clear-Host
     Write-Host ""
-    Write-Host "  ╔══════════════════════════════════════╗" -ForegroundColor Cyan
-    Write-Host "  ║     AutoScaleOps — Sifirlama Araci   ║" -ForegroundColor Cyan
-    Write-Host "  ╚══════════════════════════════════════╝" -ForegroundColor Cyan
+    Write-Host "  ================================================" -ForegroundColor Cyan
+    Write-Host "       AutoScaleOps -- Sifirlama Araci            " -ForegroundColor Cyan
+    Write-Host "  ================================================" -ForegroundColor Cyan
     Write-Host ""
 }
 
@@ -32,16 +31,16 @@ function Stop-App {
     }
 }
 
-# ── ANA MENU ────────────────────────────────────────────────────────────────
+# ── ANA MENU ──────────────────────────────────────────────────────────────────
 
 Write-Title
 
 Write-Host "  Ne yapmak istiyorsunuz?" -ForegroundColor White
 Write-Host ""
-Write-Host "  [1]  Soft Reset  — Sadece veritabani ve profil verisi silinir" -ForegroundColor Yellow
+Write-Host "  [1]  Soft Reset  - Sadece veritabani ve profil verisi silinir" -ForegroundColor Yellow
 Write-Host "       (K8s ve Docker dokunulmaz, uygulama sifirdan baslar)" -ForegroundColor DarkGray
 Write-Host ""
-Write-Host "  [2]  Full Reset  — Her sey silinir" -ForegroundColor Red
+Write-Host "  [2]  Full Reset  - Her sey silinir" -ForegroundColor Red
 Write-Host "       (Veritabani + Kubernetes kumesi + Docker image'lari)" -ForegroundColor DarkGray
 Write-Host ""
 Write-Host "  [3]  Iptal" -ForegroundColor DarkGray
@@ -49,19 +48,21 @@ Write-Host ""
 
 $secim = Read-Host "  Seciminiz (1/2/3)"
 
-# ── SOFT RESET ───────────────────────────────────────────────────────────────
+# ── SOFT RESET ────────────────────────────────────────────────────────────────
 
 if ($secim -eq "1") {
     Write-Title
     Write-Host "  SOFT RESET secildi." -ForegroundColor Yellow
     Write-Host ""
     Write-Host "  Silinecekler:" -ForegroundColor White
-    Write-Host "    - $env:USERPROFILE\.autoscaleops\  (veritabani, profil, etkinlikler)" -ForegroundColor DarkGray
+    Write-Host "    - $env:USERPROFILE\.autoscaleops\" -ForegroundColor DarkGray
+    Write-Host "      (veritabani, profil, etkinlikler)" -ForegroundColor DarkGray
     Write-Host ""
     $onay = Read-Host "  Devam edilsin mi? (E/H)"
     if ($onay -notmatch "^[Ee]$") {
-        Write-Host "`n  Iptal edildi." -ForegroundColor DarkGray
-        Start-Sleep 2
+        Write-Host ""
+        Write-Host "  Iptal edildi." -ForegroundColor DarkGray
+        Read-Host "  Kapatmak icin Enter'a basin"
         exit
     }
 
@@ -70,8 +71,8 @@ if ($secim -eq "1") {
     Remove-AppData
 
     Write-Host ""
-    Write-Host "  ✓ Soft Reset tamamlandi." -ForegroundColor Green
-    Write-Host "  Uygulamayi bir sonraki acilisinda sifirdan baslar." -ForegroundColor DarkGray
+    Write-Host "  Soft Reset tamamlandi." -ForegroundColor Green
+    Write-Host "  Uygulama bir sonraki acilisinda sifirdan baslar." -ForegroundColor DarkGray
 }
 
 # ── FULL RESET ────────────────────────────────────────────────────────────────
@@ -81,27 +82,23 @@ elseif ($secim -eq "2") {
     Write-Host "  FULL RESET secildi." -ForegroundColor Red
     Write-Host ""
     Write-Host "  Silinecekler:" -ForegroundColor White
-    Write-Host "    - $env:USERPROFILE\.autoscaleops\  (veritabani, profil, etkinlikler)" -ForegroundColor DarkGray
-    Write-Host "    - Kubernetes kumesi              (minikube delete)" -ForegroundColor DarkGray
+    Write-Host "    - $env:USERPROFILE\.autoscaleops\" -ForegroundColor DarkGray
+    Write-Host "    - Kubernetes kumesi  (minikube delete)" -ForegroundColor DarkGray
     Write-Host "    - Docker image ve container'lari  (docker system prune)" -ForegroundColor DarkGray
     Write-Host ""
     Write-Host "  Bu islem geri alinamaz!" -ForegroundColor Red
     $onay = Read-Host "  Devam edilsin mi? (E/H)"
     if ($onay -notmatch "^[Ee]$") {
-        Write-Host "`n  Iptal edildi." -ForegroundColor DarkGray
-        Start-Sleep 2
+        Write-Host ""
+        Write-Host "  Iptal edildi." -ForegroundColor DarkGray
+        Read-Host "  Kapatmak icin Enter'a basin"
         exit
     }
 
     Write-Host ""
-
-    # 1. Uygulamayı kapat
     Stop-App
-
-    # 2. Veri klasörünü sil
     Remove-AppData
 
-    # 3. Minikube sil
     Write-Host "  [..] Kubernetes kumesi siliniyor..." -ForegroundColor Yellow
     $mk = Get-Command minikube -ErrorAction SilentlyContinue
     if ($mk) {
@@ -111,8 +108,7 @@ elseif ($secim -eq "2") {
         Write-Host "  [--] minikube bulunamadi, atlandi." -ForegroundColor DarkGray
     }
 
-    # 4. Docker temizle
-    Write-Host "  [..] Docker image ve container'lari temizleniyor..." -ForegroundColor Yellow
+    Write-Host "  [..] Docker temizleniyor..." -ForegroundColor Yellow
     $dk = Get-Command docker -ErrorAction SilentlyContinue
     if ($dk) {
         docker system prune -f 2>&1 | Out-Null
@@ -122,16 +118,16 @@ elseif ($secim -eq "2") {
     }
 
     Write-Host ""
-    Write-Host "  ✓ Full Reset tamamlandi." -ForegroundColor Green
+    Write-Host "  Full Reset tamamlandi." -ForegroundColor Green
     Write-Host "  Uygulama bir sonraki acilisinda tamamen temiz baslar." -ForegroundColor DarkGray
 }
 
-# ── İPTAL ─────────────────────────────────────────────────────────────────────
+# ── IPTAL ─────────────────────────────────────────────────────────────────────
 
 else {
-    Write-Host "`n  Iptal edildi." -ForegroundColor DarkGray
+    Write-Host ""
+    Write-Host "  Iptal edildi." -ForegroundColor DarkGray
 }
 
 Write-Host ""
-Write-Host "  Pencereyi kapatmak icin bir tusa basin..." -ForegroundColor DarkGray
-$null = $Host.UI.RawUI.ReadKey("NoEcho,IncludeKeyDown")
+Read-Host "  Kapatmak icin Enter'a basin"
