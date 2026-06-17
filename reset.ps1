@@ -70,6 +70,16 @@ if ($secim -eq "1") {
     Stop-App
     Remove-AppData
 
+    # Minikube profilini de sil - yoksa sonraki baslatmada GUEST_NOT_FOUND hatasi verir
+    Write-Host "  [..] Minikube profili temizleniyor..." -ForegroundColor Yellow
+    $mk = Get-Command minikube -ErrorAction SilentlyContinue
+    if ($mk) {
+        minikube delete -p autoscaleops 2>&1 | Out-Null
+        Write-Host "  [OK] Minikube profili silindi." -ForegroundColor Green
+    } else {
+        Write-Host "  [--] minikube bulunamadi, atlandi." -ForegroundColor DarkGray
+    }
+
     Write-Host ""
     Write-Host "  Soft Reset tamamlandi." -ForegroundColor Green
     Write-Host "  Uygulama bir sonraki acilisinda sifirdan baslar." -ForegroundColor DarkGray

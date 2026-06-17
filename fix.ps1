@@ -414,13 +414,31 @@ if ($LASTEXITCODE -eq 0) {
     OK "Cluster zaten calisiyor."
 } else {
     INFO "Cluster baslatiliyor (1-3 dk)..."
-    minikube start -p $PROFILE_NAME --driver=docker --cpus=4 --memory=6144 2>&1 | Select-Object -Last 5
+    $mkOut = minikube start -p $PROFILE_NAME --driver=docker --cpus=4 --memory=6144 2>&1
+    $mkOut | Select-Object -Last 5
     if ($LASTEXITCODE -ne 0) {
-        WARN "Yuksek kaynak basarisiz - dusuk kaynak ile deneniyor..."
-        minikube start -p $PROFILE_NAME --driver=docker --cpus=2 --memory=4096 2>&1 | Select-Object -Last 5
+        # Bozuk profil tespiti: dosyalari eksik ama kayit var
+        if ($mkOut -match "GUEST_NOT_FOUND") {
+            WARN "Bozuk minikube profili tespit edildi - temizleniyor..."
+            minikube delete -p $PROFILE_NAME 2>&1 | Out-Null
+            INFO "Temiz cluster baslatiliyor..."
+            minikube start -p $PROFILE_NAME --driver=docker --cpus=4 --memory=6144 2>&1 | Select-Object -Last 5
+        }
         if ($LASTEXITCODE -ne 0) {
-            ERR "Cluster baslanamadi. Docker acik ve yeterli RAM var mi?"
-            Read-Host "Enter ile cik"; exit 1
+            WARN "Yuksek kaynak basarisiz - dusuk kaynak ile deneniyor..."
+            $mkOut2 = minikube start -p $PROFILE_NAME --driver=docker --cpus=2 --memory=4096 2>&1
+            $mkOut2 | Select-Object -Last 5
+            if ($LASTEXITCODE -ne 0) {
+                if ($mkOut2 -match "GUEST_NOT_FOUND") {
+                    WARN "Bozuk profil tekrar tespit edildi - temizleniyor..."
+                    minikube delete -p $PROFILE_NAME 2>&1 | Out-Null
+                    minikube start -p $PROFILE_NAME --driver=docker --cpus=2 --memory=4096 2>&1 | Select-Object -Last 5
+                }
+                if ($LASTEXITCODE -ne 0) {
+                    ERR "Cluster baslanamadi. Docker acik ve yeterli RAM var mi?"
+                    Read-Host "Enter ile cik"; exit 1
+                }
+            }
         }
     }
     OK "Cluster hazir."
