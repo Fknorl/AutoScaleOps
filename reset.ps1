@@ -75,6 +75,14 @@ if ($secim -eq "1") {
     $mk = Get-Command minikube -ErrorAction SilentlyContinue
     if ($mk) {
         minikube delete -p autoscaleops 2>&1 | Out-Null
+        # minikube delete bozuk profilde calismazsa dosyalari dogrudan sil
+        $mkPaths = @(
+            "$env:USERPROFILE\.minikube\machines\autoscaleops",
+            "$env:USERPROFILE\.minikube\profiles\autoscaleops"
+        )
+        foreach ($p in $mkPaths) {
+            if (Test-Path $p) { Remove-Item $p -Recurse -Force -ErrorAction SilentlyContinue }
+        }
         Write-Host "  [OK] Minikube profili silindi." -ForegroundColor Green
     } else {
         Write-Host "  [--] minikube bulunamadi, atlandi." -ForegroundColor DarkGray

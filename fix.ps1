@@ -409,6 +409,22 @@ try {
 } catch {}
 INFO "Profil: $PROFILE_NAME"
 
+# Bozuk minikube profil dosyalarini bastan temizle (GUEST_NOT_FOUND onlemi)
+function Clear-MinikubeProfile {
+    param($name)
+    minikube delete -p $name 2>&1 | Out-Null
+    # minikube delete bozuk profilde calismazsa dosyalari dogrudan sil
+    $paths = @(
+        "$env:USERPROFILE\.minikube\machines\$name",
+        "$env:USERPROFILE\.minikube\profiles\$name"
+    )
+    foreach ($p in $paths) {
+        if (Test-Path $p) {
+            Remove-Item $p -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
 minikube status -p $PROFILE_NAME 2>&1 | Out-Null
 if ($LASTEXITCODE -eq 0) {
     OK "Cluster zaten calisiyor."
@@ -417,21 +433,21 @@ if ($LASTEXITCODE -eq 0) {
     $mkOut = minikube start -p $PROFILE_NAME --driver=docker --cpus=4 --memory=6144 2>&1
     $mkOut | Select-Object -Last 5
     if ($LASTEXITCODE -ne 0) {
-        # Bozuk profil tespiti: dosyalari eksik ama kayit var
         if ($mkOut -match "GUEST_NOT_FOUND") {
             WARN "Bozuk minikube profili tespit edildi - temizleniyor..."
-            minikube delete -p $PROFILE_NAME 2>&1 | Out-Null
+            Clear-MinikubeProfile $PROFILE_NAME
             INFO "Temiz cluster baslatiliyor..."
-            minikube start -p $PROFILE_NAME --driver=docker --cpus=4 --memory=6144 2>&1 | Select-Object -Last 5
+            $mkOut = minikube start -p $PROFILE_NAME --driver=docker --cpus=4 --memory=6144 2>&1
+            $mkOut | Select-Object -Last 5
         }
         if ($LASTEXITCODE -ne 0) {
             WARN "Yuksek kaynak basarisiz - dusuk kaynak ile deneniyor..."
-            $mkOut2 = minikube start -p $PROFILE_NAME --driver=docker --cpus=2 --memory=4096 2>&1
-            $mkOut2 | Select-Object -Last 5
+            $mkOut = minikube start -p $PROFILE_NAME --driver=docker --cpus=2 --memory=4096 2>&1
+            $mkOut | Select-Object -Last 5
             if ($LASTEXITCODE -ne 0) {
-                if ($mkOut2 -match "GUEST_NOT_FOUND") {
+                if ($mkOut -match "GUEST_NOT_FOUND") {
                     WARN "Bozuk profil tekrar tespit edildi - temizleniyor..."
-                    minikube delete -p $PROFILE_NAME 2>&1 | Out-Null
+                    Clear-MinikubeProfile $PROFILE_NAME
                     minikube start -p $PROFILE_NAME --driver=docker --cpus=2 --memory=4096 2>&1 | Select-Object -Last 5
                 }
                 if ($LASTEXITCODE -ne 0) {
