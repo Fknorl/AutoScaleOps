@@ -1,240 +1,141 @@
 # AutoScaleOps
 
-**ARIMA-based Proactive Kubernetes Autoscaling Framework**
+**ARIMA tabanlı Proaktif Kubernetes Otomatik Ölçekleme Sistemi**
 
-AutoScaleOps, Kubernetes üzerinde çalışan uygulamalar için trafik artışını önceden tahmin ederek pod'ları **önceden** ölçeklendiren bir framework'tür. Geleneksel reaktif ölçeklemenin (CPU/bellek eşiği) aksine, ARIMA zaman serisi modeliyle %95 güven aralığı kullanarak proaktif karar verir.
+AutoScaleOps, Kubernetes üzerinde çalışan uygulamalar için trafik artışını önceden tahmin ederek pod'ları **trafik gelmeden önce** ölçeklendirir. Geleneksel reaktif ölçeklemenin (CPU/bellek eşiği aşılınca tepki verme) aksine, ARIMA zaman serisi modeliyle 30 dakika ilerisi tahmin edilir ve sistem önceden hazırlanır.
 
 ---
 
 ## Nasıl Çalışır?
 
 ```
-Prometheus                ARIMA Predictor           KEDA
-(gerçek trafik)  ──────►  (tahmin üret)   ──────►  (pod sayısını ayarla)
-http_requests_total       CI upper bound            predicted_rps_30min
+Prometheus          ARIMA Predictor         KEDA
+(gerçek trafik) ──► (tahmin üret)      ──► (pod sayısını ayarla)
+http_requests_total  predicted_rps_30min     min:2 / max:10 pod
 ```
 
-1. **Prometheus**'tan trafik metriği toplanır
-2. **ARIMA modeli** 5 dakika ilerisi için tahmin üretir
-3. **%95 güven aralığının üst sınırı** kullanılır → konservatif, güvenli
-4. **KEDA**, bu tahmini okuyarak pod sayısını belirler
-5. Trafik gelmeden önce pod'lar hazır olur → **cold-start gecikmesi ortadan kalkar**
+1. **Prometheus** uygulamadan trafik metriği toplar (her 15 saniyede scrape)
+2. **AI Predictor Pod** bu veriyi alır, IQR ile aykırı değerleri temizler, ARIMA ile 30 dakika sonrasını tahmin eder
+3. **Domain Profili** tahmini ayarlar: saat ağırlığı × etkinlik marjı
+4. **KEDA** tahmini okur ve pod sayısını belirler (her 100 RPS için 1 pod)
+5. Trafik gelmeden önce pod'lar hazır olur → cold-start gecikmesi ortadan kalkar
 
 ---
 
-## Kurulum
+## Kurulum ve Çalıştırma
 
-### 🖥️ Masaüstü Uygulaması (Önerilen — Sıfır Terminal Bilgisi Gerekir)
-
-Windows kullanıcıları için her şeyi otomatik kuran tek tıklık yükleyici:
+### Tek adım — AutoScaleOps.bat'a çift tıkla
 
 ```
-1. Repoyu indir:
-   git clone https://github.com/Fknorl/AutoScaleOps.git
-   — veya — GitHub'dan "Code > Download ZIP" ile indir, çıkart
-
-2. AutoScaleOps.bat dosyasına çift tıkla
+AutoScaleOps.bat dosyasına çift tıkla → her şey otomatik
 ```
 
-**Geri kalan her şey otomatik:**
-- Python yoksa → winget ile kurar
-- Docker Desktop yoksa → winget ile kurar, başlatır
-- Minikube / kubectl / Helm yoksa → winget ile kurar
-- Kubernetes cluster'ı başlatır
-- Prometheus + KEDA'yı Helm ile kurar
-- Masaüstü uygulamasını açar
+Arka planda sırayla şunlar gerçekleşir:
 
-> **Not:** İlk açılışta kurulum 5–10 dakika sürebilir (Docker ve Kubernetes indirme). Sonraki açılışlarda doğrudan uygulamaya girer.
+- Python, Docker Desktop, Minikube, kubectl, Helm eksikse otomatik kurulur
+- Kubernetes kümesi (Minikube) başlatılır
+- Flask test uygulaması, AI Predictor, Prometheus, Pushgateway ve KEDA deploy edilir
+- Port-forward bağlantıları kurulur
+- Masaüstü yönetim uygulaması açılır
+
+> **Not:** İlk açılışta kurulum 5–15 dakika sürebilir (Docker ve Minikube indirme dahil). Sonraki açılışlarda doğrudan uygulamaya girer.
+
+### Gereksinimler
+
+- **Windows 10/11** (64-bit)
+- **8 GB RAM** (minimum), 16 GB önerilir
+- **İnternet bağlantısı** (ilk kurulum için)
+- Yönetici (Administrator) yetkisi
 
 ---
 
-### ⚙️ CLI / Framework Kurulumu (Geliştirici)
+## Uygulama Panelleri
 
-#### Gereksinimler
+### Dashboard
+Gerçek zamanlı izleme: gerçek RPS (mavi), AI tahmini (kırmızı kesikli), pod sayısı ve KEDA durumu. Altında `kubectl` çıktıları ile Kubernetes altyapısı şeffaf biçimde görünür.
 
-- Python 3.10+
-- kubectl
-- Helm 3+
-- Kubernetes cluster (minikube, EKS, GKE, AKS...)
-- KEDA v2+
-- Prometheus + Pushgateway
+### AI Profil
+Yapay zekanın ayarlanabilir kısmı:
+- **Saat ağırlıkları** — 0-23 arası her saat için çarpan (0.1–3.0 arası kaydırıcı)
+- **Etkinlik takvimi** — Kampanya, yoğun dönem gibi özel günler için güvenlik marjı (%15–%80)
+- **Isı haritası** — Sistemin öğrendiği haftalık trafik örüntüsü (7 gün × 24 saat)
+- **Otomatik Profil Danışmanı** — Geçmiş veriden saat ağırlıklarını otomatik hesaplar (min. 3 gün veri gerekli)
 
-#### pip ile Kur
+### Deploy
+Klasör seç → Dockerfile algıla veya oluştur → Image build et → Kubernetes'e deploy et → KEDA ile ölçeklemeyi bağla.
 
-```bash
-pip install autoscaleops
-```
-
-#### Sistem Kontrolü
-
-```bash
-autoscaleops doctor
-```
+### Sorun Giderici
+Tam sistem tanısı: Docker, Minikube, port-forward, Prometheus, KEDA. Hatalı bileşenin yanına **Otomatik Düzelt** butonu çıkar.
 
 ---
 
-## Hızlı Başlangıç
+## Sıfırlama
 
-### 1. Config Dosyası Oluştur
+Sistemi temizden başlatmak için `reset.bat`'a çift tıkla:
 
-```bash
-autoscaleops init \
-  --name myapp \
-  --image myapp:latest \
-  --port 8080 \
-  --namespace production
-```
-
-Bu komut `autoscaleops.yaml` dosyasını oluşturur.
-
-### 2. Config'i Düzenle
-
-```yaml
-# autoscaleops.yaml
-project:
-  name: myapp
-  namespace: production
-
-app:
-  image: myapp:latest
-  port: 8080
-  replicas:
-    min: 2
-    max: 20
-
-metrics:
-  prometheus_url: "http://prometheus:9090"
-  pushgateway_url: "http://pushgateway:9091"
-  source_metric: "http_requests_total"   # kendi metriğini yaz
-
-arima:
-  forecast_horizon: 5    # kaç dakika ilerisi tahmin edilsin
-  ci_level: 0.95         # güven aralığı seviyesi
-
-keda:
-  threshold: 10          # pod başına düşen RPS
-```
-
-### 3. Doğrula
-
-```bash
-autoscaleops validate
-```
-
-### 4. Deploy Et
-
-```bash
-autoscaleops deploy
-```
-
-### 5. Durumu İzle
-
-```bash
-autoscaleops status
-```
-
----
-
-## CLI Komutları
-
-| Komut | Açıklama |
-|-------|----------|
-| `autoscaleops init` | Yeni config dosyası oluştur |
-| `autoscaleops validate` | Config'i doğrula ve ayarları göster |
-| `autoscaleops deploy` | Cluster'a deploy et |
-| `autoscaleops doctor` | Sistem gereksinimlerini kontrol et |
-| `autoscaleops status` | Cluster kaynaklarının durumunu göster |
-| `autoscaleops stop` | Deployment'ı kaldır |
-| `autoscaleops report --input metrics.csv` | Analiz raporu ve grafik üret |
+- **Soft Reset** — Veritabanı ve profil verisi silinir, Kubernetes dokunulmaz
+- **Full Reset** — Her şey silinir (veritabanı + Kubernetes kümesi + Docker image'ları)
 
 ---
 
 ## Neden ARIMA?
 
-| Özellik | Reaktif (CPU) | ARIMA (AutoScaleOps) |
-|---------|--------------|----------------------|
-| Karar zamanı | Trafik geldikten sonra | Trafik gelmeden önce |
+| Özellik | Reaktif (CPU/RAM) | Proaktif (AutoScaleOps) |
+|---|---|---|
+| Karar zamanı | Trafik geldikten sonra | Trafik gelmeden 30 dk önce |
 | Cold-start riski | Yüksek | Düşük |
 | Güven aralığı | Yok | %95 CI |
-| p99 latency | ~350ms | ~70ms |
-| Yanlış alarm | Var | ADF testi ile azaltılmış |
+| p99 gecikme | ~350ms | ~70ms |
+| Spike koruması | Yok | IQR ile aykırı değer temizleme |
 
-### Deneysel Bulgular
-
-5 model (ARIMA, EMA, Holt-Winters, Prophet, Naive) walk-forward cross-validation ile karşılaştırılmıştır:
-
-| Model | MAPE (5dk) | MAPE (30dk) | Compute |
-|-------|-----------|------------|---------|
-| EMA | %11.7 | %11.9 | <1ms |
-| ARIMA | %15.3 | %16.3 | ~7500ms |
-| Prophet | %15.4 | %34.7 | ~375ms |
-
-**EMA daha doğru tahmin eder, ARIMA daha iyi karar verir.**
-ARIMA'nın güven aralığı üretebilmesi üretim ortamında kritiktir.
-EMA tek bir sayı döndürür; ARIMA "en kötü ihtimalle şu kadar gelir, ona göre hazırlan" diyebilir.
+Yeterli veri yoksa ARIMA yerine EMA (basit hareketli ortalama) devreye girer — sistem hiçbir zaman cevapsız kalmaz.
 
 ---
 
-## Desteklenen Metrikler
+## Deneysel Bulgular
 
-Herhangi bir Prometheus gauge/counter metriği kullanılabilir:
+5 model walk-forward cross-validation ile karşılaştırılmıştır:
 
-```yaml
-metrics:
-  source_metric: "http_requests_total"           # Flask/FastAPI
-  source_metric: "nginx_http_requests_total"     # NGINX
-  source_metric: "istio_requests_total"          # Istio
-  source_metric: "myapp_api_calls_count"         # Custom
-```
+| Model | MAPE (5dk) | MAPE (30dk) |
+|---|---|---|
+| EMA | %11.7 | %11.9 |
+| ARIMA | %15.3 | %16.3 |
+| Prophet | %15.4 | %34.7 |
+
+ARIMA, güven aralığı üretebilmesi nedeniyle tercih edilmiştir. EMA tek bir sayı döndürürken ARIMA "en kötü ihtimalle şu kadar gelir, ona göre hazırlan" diyebilir — bu üretim ortamında kritiktir.
+
+**Temel bulgular (reaktif vs. proaktif karşılaştırma):**
+- p95 gecikme **%35 azaldı**
+- Yüksek gecikme olayları (>150ms p99) **%60 azaldı** (126 → 50 olay)
+- İstatistiksel anlamlılık: Welch t-test ve Mann-Whitney U (p < 0.0001)
 
 ---
 
 ## Proje Yapısı
 
 ```
-autoscaleops/
-├── __init__.py
-├── cli.py              # CLI komutları
-├── config.py           # YAML config yükleyici
-├── deploy.py           # kubectl/helm operasyonları
-└── templates/
-    └── autoscaleops.yaml.j2
+autoscaleops_app.py       ← PyQt6 masaüstü yönetim uygulaması
+AutoScaleOps.bat          ← Tek tıkla başlatıcı
+fix.ps1                   ← Kurulum ve başlatma sihirbazı
+reset.bat / reset.ps1     ← Sistem sıfırlama aracı
 
 ai-model/
-└── predictor.py        # ARIMA predictor (Kubernetes pod)
+└── predictor.py          ← ARIMA/EMA tahmin motoru (K8s pod)
 
-charts/
-└── autoscaleops/       # Helm chart
-    ├── Chart.yaml
-    ├── values.yaml
-    └── templates/
+app/
+└── app.py                ← Flask test uygulaması
 
-analiz.py               # Deney analiz ve grafik aracı
+charts/autoscaleops/      ← Helm chart (tüm K8s kaynakları)
+
+dashboard/
+└── dashboard.py          ← Streamlit izleme arayüzü
+
+core/                     ← Kubernetes, tünel ve yapılandırma yöneticileri
+docs/                     ← Mimari ve kurulum dökümantasyonu
 ```
-
----
-
-## Akademik Arka Plan
-
-Bu proje, proaktif Kubernetes ölçeklemenin reaktif yöntemlere karşı avantajını deneysel olarak ölçmek amacıyla geliştirilmiştir.
-
-**Temel bulgular:**
-- ARIMA tabanlı proaktif ölçekleme, reaktif ölçeklemeye kıyasla p95 latency'yi **%35 azaltmıştır**
-- Yüksek gecikme (>150ms p99) olayları **%60 azalmıştır** (126 → 50 örnek)
-- İstatistiksel anlamlılık: Welch t-test ve Mann-Whitney U test (p < 0.0001)
 
 ---
 
 ## Lisans
 
 MIT License
-
----
-
-## Katkıda Bulunmak
-
-```bash
-git clone https://github.com/Fknorl/AutoScaleOps.git
-cd AutoScaleOps
-pip install -e ".[dev]"
-```
