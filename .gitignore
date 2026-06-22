@@ -46,13 +46,27 @@ spike_results*.csv
 build/
 dist/
 
-# Claude ic dosyalari (ayarlar gizli kalsin, komutlar paylasim)
-.claude/settings.local.json
-.claude/settings.json
-.claude/worktrees/
-.claude/plans/
-.claude/update_memory.ps1
-# .claude/commands/ TAKIP EDILIR (ajan komutlari)
+# Claude ic dosyalari
+.claude/
+CLAUDE.md
+
+# Deney ve analiz scriptleri
+analiz.py
+autoscaleops_model_comparison.py
+capacity_test.py
+spike_test.py
+run_experiments.py
+run_post_b_experiment.sh
+metrics_logger.py
+model_comparison.py
+traffic_simulator.py
+start_experiment.bat
+generate_paper.py
+create_report.js
+makale.js
+package.json
+package-lock.json
+keda_scaledobject_proactive.yaml
 
 # Belge arsivi (buyuk dosyalar, test sonuclari)
 Belgeler/
